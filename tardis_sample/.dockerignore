@@ -1,6 +1,5 @@
 **/__pycache__
 **/*.pyc
-step2/output
 step2/*/output
 step2/evidence
 step2/tests

@@ -27,6 +27,5 @@ __pycache__/
 /tardis_sample/step2/01_collector/output/
 /tardis_sample/step2/02_normalize_tardis/output/
 /tardis_sample/step2/03_compare/output/
-/tardis_sample/step2/output/
 /tardis_sample/step2/evidence/
 nohup.out
