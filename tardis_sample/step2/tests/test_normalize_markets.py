@@ -12,6 +12,9 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import SCHEMAS
 
+engine = importlib.import_module('02_normalize_tardis.normalization')
+mapper_for, replay = engine.mapper_for, engine.replay
+
 MS = 1795610400000
 LOCAL = MS * 1000 + 987
 
@@ -46,7 +49,7 @@ class MarketMappingTests(unittest.TestCase):
         # 每個測試使用獨立 SQLite，避免跨案例去重。
         db = sqlite3.connect(':memory:')
         self.addCleanup(db.close)
-        return importlib.import_module('02_normalize_tardis_' + family).Mapper(db)
+        return mapper_for(family)(db)
 
     def test_bybit_trade_batch_and_liquidation(self):
         # 檢查拆批、壞元素、跨副本重送、同 ID 衝突與清算的持倉反向。
@@ -166,7 +169,7 @@ class MarketMappingTests(unittest.TestCase):
 
     def test_replay_window_and_market_guard(self):
         # 在窗前暖機再依事件日期輸出，檢查表頭、版本紀錄、覆寫保護與跨市場拒絕。
-        module = importlib.import_module('02_normalize_tardis_bybit')
+        module = mapper_for('bybit')
         data = dict(symbol='BTCUSDT', lastPrice='20')
         events = [bybit('tickers', data), bybit('tickers', dict(data, markPrice='19'), ts=MS+1)]
         with tempfile.TemporaryDirectory() as work:
@@ -177,7 +180,7 @@ class MarketMappingTests(unittest.TestCase):
             lines = [json.dumps(dict(event, seq=i)) for i, event in enumerate(events, 1)]
             (root/'raw'/'0001.jsonl').write_text('\n'.join(lines)+'\n')
             out = root/'csv'
-            report = module.normalize(root, out, start=(MS+1)*1000)
+            report = replay(module, root, out, start=(MS+1)*1000)
             self.assertTrue(report['mapper_reference']['sources']['bybit.ts']['sha256'])
             path = next(out.glob('bybit/derivative_ticker/*.csv'))
             with path.open() as handle:
@@ -187,7 +190,7 @@ class MarketMappingTests(unittest.TestCase):
             self.assertEqual([(r['last_price'],r['mark_price'],r['predicted_funding_rate']) for r in rows], [('20','19','')])
             self.assertEqual(len(next(out.glob('bybit/liquidations/*.csv')).read_text().splitlines()), 1)
             with self.assertRaises(FileExistsError):
-                module.normalize(root, out)
+                replay(module, root, out)
             with self.assertRaisesRegex(ValueError, 'unexpected markets'):
-                importlib.import_module('02_normalize_tardis_okx').normalize(root, root/'wrong')
+                replay(mapper_for('okx'), root, root/'wrong')
             self.assertFalse((root/'wrong').exists())

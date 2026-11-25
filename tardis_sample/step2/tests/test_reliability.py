@@ -1,4 +1,5 @@
 """實際運行問題的回歸：修復風暴、持久化積壓、歷史索引與封存重播。"""
+import importlib
 import asyncio
 import fcntl
 import gzip
@@ -12,14 +13,17 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import test_redundancy as fixtures
 from test_redundancy import config, event, send
-from common import key
-from delivery import Spool
-from replica_monitor import Monitor
-from redundancy import DEFAULTS
-from rest_schedule import Schedule
-from channel_export import Exporter
-from raw import read_records, export_channels
-from worker import Worker
+key = importlib.import_module('01_collector.transport').key
+Spool = importlib.import_module("01_collector.delivery").Spool
+monitor_module = importlib.import_module("01_collector.replica_monitor")
+Monitor = monitor_module.Monitor
+DEFAULTS = importlib.import_module("01_collector.redundancy").DEFAULTS
+Schedule = importlib.import_module("01_collector.rest_schedule").Schedule
+Exporter = importlib.import_module("01_collector.channel_export").Exporter
+from common.raw_reader import read_records
+export_channels = importlib.import_module("01_collector.raw").export_channels
+worker_module = importlib.import_module("01_collector.worker")
+Worker = worker_module.Worker
 
 
 class RepairTests(unittest.TestCase):
@@ -45,7 +49,7 @@ class RepairTests(unittest.TestCase):
         monitor = self.monitor()
         for now in (1000, 1010, 1020):
             states = {'a': self.state(now, now), 'b': self.state(now, now-1)}
-            with patch('replica_monitor.time.time', return_value=now): commands, _ = monitor.repairs(['a', 'b'], states)
+            with patch.object(monitor_module.time, 'time', return_value=now): commands, _ = monitor.repairs(['a', 'b'], states)
             self.assertEqual(commands, {'a': [], 'b': []})
 
     def test_stall_requires_peer_progress_and_is_session_bound(self):
@@ -53,23 +57,23 @@ class RepairTests(unittest.TestCase):
         monitor = self.monitor()
         for now, count in ((1000, 10), (1006, 15)):
             states = {'a': self.state(now, 900), 'b': self.state(now, now, count)}
-            with patch('replica_monitor.time.time', return_value=now): commands, _ = monitor.repairs(['a', 'b'], states)
+            with patch.object(monitor_module.time, 'time', return_value=now): commands, _ = monitor.repairs(['a', 'b'], states)
         command = commands['a'][0]; group = next(iter(monitor.groups.values()))
         target = SimpleNamespace(repair={group['id']: command}, stats=states['a']['feeds'])
-        with patch('worker.time.time', return_value=1006): self.assertFalse(Worker.repair_due(target, group, 'new'))
+        with patch.object(worker_module.time, 'time', return_value=1006): self.assertFalse(Worker.repair_due(target, group, 'new'))
         target.repair[group['id']] = command
         for value in target.stats.values(): value['last_data_us'] = 1006000000
-        with patch('worker.time.time', return_value=1006): self.assertFalse(Worker.repair_due(target, group, 's'))
-        with patch('replica_monitor.time.time', return_value=1007): self.assertEqual(monitor.repairs(['a', 'b'], states)[0]['a'], [])
+        with patch.object(worker_module.time, 'time', return_value=1006): self.assertFalse(Worker.repair_due(target, group, 's'))
+        with patch.object(monitor_module.time, 'time', return_value=1007): self.assertEqual(monitor.repairs(['a', 'b'], states)[0]['a'], [])
 
     def test_stale_control_and_new_session_do_not_trigger_repair(self):
         # 過期狀態及新連線不參與落後判定，避免延遲回報觸發新一輪修復。
         monitor = self.monitor(); states = {'a': self.state(900, 800), 'b': self.state(1000, 1000)}
-        with patch('replica_monitor.time.time', return_value=1000): self.assertEqual(monitor.repairs(['a', 'b'], states)[0]['a'], [])
+        with patch.object(monitor_module.time, 'time', return_value=1000): self.assertEqual(monitor.repairs(['a', 'b'], states)[0]['a'], [])
         state = self.state(1000, 0)
         for value in state['feeds'].values(): value['session_started_us'] = 999000000
         states['a'] = state
-        with patch('replica_monitor.time.time', return_value=1000): self.assertEqual(monitor.repairs(['a', 'b'], states)[0]['a'], [])
+        with patch.object(monitor_module.time, 'time', return_value=1000): self.assertEqual(monitor.repairs(['a', 'b'], states)[0]['a'], [])
 
     def test_strict_preflight_identifies_unsupported_sources(self):
         # 明確列出不可能通過的來源；共同成交不能掩蓋 ticker 的未驗證狀態。
@@ -155,7 +159,7 @@ class PersistenceTests(unittest.TestCase):
 
     def test_seal_rename_crash_recovers_segment_catalog(self):
         # 封存已改名、資料庫尚未提交時重啟，CSV 必須仍看得到完整段。
-        from delivery import MergeStore
+        MergeStore = importlib.import_module("01_collector.delivery").MergeStore
         send(self.store, 'a', [event()])
         name = self.store.db.execute('SELECT path FROM output').fetchone()[0]
         path = self.root/name; path.rename(path.with_suffix(''))
@@ -174,7 +178,7 @@ class PersistenceTests(unittest.TestCase):
 
     def test_csv_crash_and_compressed_replay(self):
         # 寫完 CSV 尚未提交游標時中止，下次截回並重播，壓縮後結果仍一致。
-        from retention import compress_ready
+        compress_ready = importlib.import_module("01_collector.retention").compress_ready
         started = 1704067199000000
         target = self.root / 'export'
         send(self.store, 'a', [event(local=started)])
@@ -239,7 +243,8 @@ class PersistenceTests(unittest.TestCase):
 
     def test_binary_keys_and_legacy_text_store(self):
         # 新索引壓緊雜湊，非典型原生字串保留；舊版文字資料庫繼續辨識同一副本。
-        from delivery import MergeStore, database
+        MergeStore = importlib.import_module("01_collector.delivery").MergeStore
+        database = importlib.import_module("01_collector.delivery").database
         original = event()
         send(self.store, 'a', [original])
         types = self.store.db.execute('SELECT typeof(feed),typeof(ident),length(digest) FROM seen').fetchone()

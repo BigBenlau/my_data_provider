@@ -4,10 +4,10 @@
 
 ## 三階段邊界
 
-- `01_collect.py` 與 `collectors/` 只負責原始採集、原文保存、來源識別、連線管理、REST 排程及採集日誌。
+- `01_collector/01_collect.py` 與 `01_collector/collectors/` 只負責原始採集、原文保存、來源識別、連線管理、REST 排程及採集日誌。
 - 採集端不得建立或合併 L2 訂單簿、計算 quotes、合併 ticker／markPrice／OI、過濾成交類別或進行行情語義去重。可觀察更新序號並記錄缺口、要求補取新快照，但不得改寫原文或宣稱訂單簿已同步。
-- `02_normalize_tardis_<交易所>.py` 才負責訂單簿重建、欄位映射、狀態合併與正規化去重；只讀已保存的原始資料。
-- `03_compare_tardis.py` 只負責與參考資料對帳。三階段程式名稱、輸出目錄及執行方式必須分開。
+- `02_normalize_tardis/02_normalize_tardis.py` 與各交易所 mapper 才負責訂單簿重建、欄位映射、狀態合併與正規化去重；只讀已保存的原始資料。
+- `03_compare/03_compare_tardis.py` 只負責與參考資料對帳。三階段程式名稱、輸出目錄及執行方式必須分開。
 
 ## Supervisor 副本整合例外
 
@@ -15,7 +15,7 @@
 
 ## 每次修改正規化前，必須重新核對 GitHub
 
-每次修改 `02_normalize_tardis_<交易所>.py`，或修改會影響其輸出的共用函式、欄位、時間、排序、去重、快照及狀態規則，都必須在當次任務重新連線讀取下列 GitHub 原碼，不能只依賴記憶、舊摘要或本地 `reference/`：
+每次修改 `02_normalize_tardis/02_normalize_tardis.py` 與各交易所 mapper，或修改會影響其輸出的共用函式、欄位、時間、排序、去重、快照及狀態規則，都必須在當次任務重新連線讀取下列 GitHub 原碼，不能只依賴記憶、舊摘要或本地 `reference/`：
 
 1. 核對對應交易所的 mapper（Binance、Bybit V5、OKX 的 okex.ts、Coinbase 或 Upbit），並沿用原有的 Binance 核對基準：<https://github.com/tardis-dev/tardis-node/blob/master/src/mappers/binance.ts>
 2. ticker 狀態 helper：<https://github.com/tardis-dev/tardis-node/blob/master/src/mappers/mapper.ts>
@@ -25,7 +25,7 @@
 
 - 解析當次上游 commit SHA，使用同一 SHA 的原始檔核對，避免混合不同版本。
 - 明確比較本次變更涉及的欄位、事件時間、接收時間、空值、輸出觸發、快照緩存及重置行為。
-- 在 `reference/README.md` 記錄核對日期、完整 commit、永久 GitHub 連結、原碼 SHA-256、對應本地程式與有意保留的差異；第三方參考碼保留原文及授權。
+- 在 `02_normalize_tardis/reference/README.md` 記錄核對日期、完整 commit、永久 GitHub 連結、原碼 SHA-256、對應本地程式與有意保留的差異；第三方參考碼保留原文及授權。
 - 正規化報告必須記錄所用上游版本及本地程式雜湊，讓原始資料可依版本重播。執行離線正規化本身不需要連線 GitHub。
 - 修改後執行涵蓋受影響語義的固定資料回歸測試；不可因 CSV 欄位相同，就宣稱與 Tardis 逐列完全一致。
 - 最終回覆指出本次核對的 GitHub 連結、commit、修改內容、測試及仍存在的差異。

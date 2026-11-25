@@ -20,26 +20,35 @@
 !/tardis_sample/step1/README.md
 !/tardis_sample/step1/AGENTS.md
 
-# 採集、正規化、對帳及測試。只允許已知的部署設定與操作文件。
+# 只收錄各階段的原始碼、已知部署設定與操作文件。
 !/tardis_sample/step2/
-!/tardis_sample/step2/*.py
-!/tardis_sample/step2/settings.json
-!/tardis_sample/step2/requirements.txt
-!/tardis_sample/step2/Dockerfile
-!/tardis_sample/step2/compose.yaml
-!/tardis_sample/step2/collector.service.example
 !/tardis_sample/step2/README.md
-!/tardis_sample/step2/RUN_01_02.md
-!/tardis_sample/step2/DOCKER_DEPLOYMENT.md
 !/tardis_sample/step2/AGENTS.md
-!/tardis_sample/step2/SOURCE_COVERAGE.md
-!/tardis_sample/step2/collectors/
-!/tardis_sample/step2/collectors/*.py
+!/tardis_sample/step2/RUN_01_02.md
+!/tardis_sample/step2/Dockerfile
+!/tardis_sample/step2/requirements.txt
+!/tardis_sample/step2/common/
+!/tardis_sample/step2/common/*.py
 !/tardis_sample/step2/tests/
 !/tardis_sample/step2/tests/*.py
+!/tardis_sample/step2/01_collector/
+!/tardis_sample/step2/01_collector/*.py
+!/tardis_sample/step2/01_collector/settings.json
+!/tardis_sample/step2/01_collector/compose.yaml
+!/tardis_sample/step2/01_collector/collector.service.example
+!/tardis_sample/step2/01_collector/DOCKER_DEPLOYMENT.md
+!/tardis_sample/step2/01_collector/SOURCE_COVERAGE.md
+!/tardis_sample/step2/01_collector/collectors/
+!/tardis_sample/step2/01_collector/collectors/*.py
+!/tardis_sample/step2/02_normalize_tardis/
+!/tardis_sample/step2/02_normalize_tardis/*.py
+!/tardis_sample/step2/02_normalize_tardis/mappers/
+!/tardis_sample/step2/02_normalize_tardis/mappers/*.py
+!/tardis_sample/step2/03_compare/
+!/tardis_sample/step2/03_compare/*.py
 
-# 固定版本的上游參考原碼、授權與版本說明隨程式保存。
-!/tardis_sample/step2/reference/
-!/tardis_sample/step2/reference/*.ts
-!/tardis_sample/step2/reference/LICENSE
-!/tardis_sample/step2/reference/README.md
+# 固定版本的上游原始碼、授權與核對紀錄。
+!/tardis_sample/step2/02_normalize_tardis/reference/
+!/tardis_sample/step2/02_normalize_tardis/reference/*.ts
+!/tardis_sample/step2/02_normalize_tardis/reference/LICENSE
+!/tardis_sample/step2/02_normalize_tardis/reference/README.md

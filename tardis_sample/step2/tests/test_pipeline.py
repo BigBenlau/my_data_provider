@@ -1,9 +1,13 @@
 """管線回歸測試：固定資料與本機伺服器驗證原始保存、三階段語義、異常恢復及日誌。"""
 import asyncio
+import base64
 from collections import Counter
 import csv
+import fcntl
+from functools import partial
 import gzip
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import sqlite3
@@ -14,18 +18,24 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from common import (configuration,feeds,dec,validate,ProtocolError,SCHEMAS,atomic_json)
-from raw import Writer,StorageError,read_records
-from collectors.binance import Collector
-from common import Budget
+from common import ProtocolError, SCHEMAS, atomic_json, dec, utc
+from common.protocol import validate
+from common.raw_reader import read_records
+
+transport = importlib.import_module('01_collector.transport')
+configuration, feeds, Budget = transport.configuration, transport.feeds, transport.Budget
+raw_writer = importlib.import_module('01_collector.raw')
+Writer, StorageError, ChannelCSV = raw_writer.Writer, raw_writer.StorageError, raw_writer.ChannelCSV
+CHANNELS, channel_row, export_channels = raw_writer.CHANNELS, raw_writer.channel_row, raw_writer.export_channels
+Collector = importlib.import_module("01_collector.collectors.binance").Collector
 # 數字開頭的入口檔使用 importlib 載入，避免為測試另留重複入口。
-import importlib
-collect_entry = importlib.import_module('01_collect')
-normalize_entry = importlib.import_module('02_normalize_tardis')
-compare_entry = importlib.import_module('03_compare_tardis')
-Mapper, process, compare = normalize_entry.Mapper, normalize_entry.normalize, compare_entry.compare
+collect_entry = importlib.import_module('01_collector.01_collect')
+normalize_entry = importlib.import_module('02_normalize_tardis.mappers.binance')
+replay = importlib.import_module('02_normalize_tardis.normalization').replay
+compare_entry = importlib.import_module('03_compare.03_compare_tardis')
+Mapper, compare = normalize_entry.Mapper, compare_entry.compare
+process = partial(replay, Mapper)
 Book, BookEngine, BookError = normalize_entry.Book, normalize_entry.BookEngine, normalize_entry.BookError
-from raw import export_channels
 
 NOW=1792600000000000
 
@@ -249,7 +259,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         config = configuration()
         collector = Collector(config, self.root, self.writer, http)
         feed = feeds(config)[0]
-        with patch('common.asyncio.TimeoutError', LegacyTimeout), patch('common.random.uniform', return_value=.01):
+        with patch.object(transport.asyncio, 'TimeoutError', LegacyTimeout), patch.object(transport.random, 'uniform', return_value=.01):
             task = asyncio.create_task(collector.stream(feed))
             try:
                 await asyncio.wait_for(wait_until(lambda: collector.events['disconnected'] >= 2 or task.done()), 2)
@@ -282,7 +292,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProtocolError):await c.rest(feed,'openInterest','s')
         self.assertEqual(c.stat(feed)['received'],0)
         response.status=429;response.headers={'Retry-After':'20'}
-        from common import HTTPFailure
+        HTTPFailure = transport.HTTPFailure
         with self.assertRaises(HTTPFailure):await c.rest(feed,'openInterest','s')
         self.assertGreater(c.budgets['binance-futures'].cooldown,time.monotonic()+19)
     async def test_healthy_requires_recent_and_liquidation_ack(self):
@@ -456,22 +466,6 @@ class SupervisorTests(unittest.TestCase):
 
 
 # 原始 channel 必須保存每個訊息，重播結果須逐位元組一致。
-import base64
-import csv
-import fcntl
-import json
-from pathlib import Path
-import sys
-import tempfile
-import unittest
-from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from raw import CHANNELS, ChannelCSV, channel_row
-from common import atomic_json, utc
-from raw import export_channels
-from raw import Writer, StorageError, read_records
-
 DAY = 1792627200000000
 CONFIG = {'markets': ['binance', 'binance-futures'],
           'symbols': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'GRTUSDT']}
@@ -596,7 +590,7 @@ class OriginalChannelTests(unittest.TestCase):
     def test_channel_disk_failure_stops_writer_raw_remains_recoverable(self):
         # CSV 寫入失敗應停止 writer，但先落盤的 raw 仍可顯式恢復。
         with tempfile.TemporaryDirectory() as d:
-            with patch('raw.ChannelCSV.consume', side_effect=OSError('channel disk failed')):
+            with patch.object(ChannelCSV, 'consume', side_effect=OSError('channel disk failed')):
                 writer = Writer(d, min_free_gib=.001, channel_config=CONFIG, started_us=DAY)
                 record = received('ticker', {'c': '1'}); record.pop('seq'); kind = record.pop('kind')
                 writer.emit(kind, **record)
@@ -633,7 +627,8 @@ class ModularTests(unittest.TestCase):
     """ModularTests 測試組：集中驗證對應模組的行為與失敗邊界。"""
     def test_market_adapters_and_protocol_boundaries(self):
         # 每個市場使用自己的訂閱與錯誤格式，不混用不相容商品代碼。
-        from common import ADAPTERS, adapter
+        from common.protocol import ADAPTERS
+        adapter = transport.adapter
         for market in ADAPTERS:
             config=configuration(markets=[market]); actual=feeds(config)
             self.assertTrue(actual)
@@ -644,8 +639,8 @@ class ModularTests(unittest.TestCase):
             self.assertEqual(adapter(market).classify(actual[0],error)[0],'error')
         with self.assertRaisesRegex(ValueError,'separately'):
             configuration(markets=['bybit','coinbase'])
-        from collectors.okx import Collector as OKX
-        from collectors.upbit import Collector as Upbit
+        OKX = importlib.import_module("01_collector.collectors.okx").Collector
+        Upbit = importlib.import_module("01_collector.collectors.upbit").Collector
         self.assertEqual(OKX.application_heartbeat,'ping');self.assertFalse(Upbit.requires_ack)
         self.assertEqual(configuration(markets=['coinbase'])['symbols'][0],'BTC-USD')
         self.assertEqual(configuration(markets=['okex-swap'])['symbols'][0],'BTC-USDT-SWAP')
@@ -713,7 +708,7 @@ class OtherMarketIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def check_market(self, market, channel, data, port):
         # 用真實本機連線驗證重連後原文仍完整保存，且每次連線有獨立 session。
         from aiohttp import ClientSession
-        from common import adapter
+        adapter = transport.adapter
         with tempfile.TemporaryDirectory() as d:
             config=configuration(markets=[market]);config.update(proxy=None,min_free_gib=.001)
             config['symbols']=config['symbols'][:1]
@@ -722,7 +717,7 @@ class OtherMarketIntegrationTests(unittest.IsolatedAsyncioTestCase):
             try:
                 async with ClientSession() as http:
                     collector=adapter(market)(config,Path(d),writer,http)
-                    with patch('common.random.uniform',return_value=.01):
+                    with patch.object(transport.random, 'uniform',return_value=.01):
                         task=asyncio.create_task(collector.stream(feed))
                         try:
                             await asyncio.wait_for(wait_until(lambda: collector.stat(feed)['received'] >= 2), 4)
@@ -791,7 +786,7 @@ class SourceStyleTests(unittest.TestCase):
         import io
         import tokenize
         root = Path(__file__).resolve().parents[1]
-        paths = [*root.glob('*.py'), *root.joinpath('collectors').glob('*.py'), *root.joinpath('tests').glob('*.py')]
+        paths = [path for path in root.rglob('*.py') if 'output' not in path.relative_to(root).parts]
         for path in paths:
             source = path.read_text()
             lines = source.splitlines()
@@ -843,7 +838,7 @@ class AiohttpCompatibilityTests(unittest.TestCase):
     def test_modern_websocket_timeout(self):
         # 模擬新版公開 API；連線關閉限時兩秒，接收限時不由此設定。
         import aiohttp
-        from common import websocket_timeout
+        websocket_timeout = transport.websocket_timeout
         with patch.object(aiohttp, 'ClientWSTimeout', create=True) as factory:
             self.assertIs(websocket_timeout(), factory.return_value)
             factory.assert_called_once_with(ws_close=2)
@@ -851,7 +846,7 @@ class AiohttpCompatibilityTests(unittest.TestCase):
     def test_missing_websocket_timeout_api(self):
         # 刻意移除公開屬性，重現使用者環境，確認不再拋出 AttributeError。
         import aiohttp
-        from common import websocket_timeout
+        websocket_timeout = transport.websocket_timeout
         with patch.dict(aiohttp.__dict__):
             aiohttp.__dict__.pop('ClientWSTimeout', None)
             self.assertEqual(websocket_timeout(), 2.0)

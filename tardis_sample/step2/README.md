@@ -4,15 +4,15 @@
 
 | 階段 | 入口 | 輸出 |
 |---|---|---|
-| 01 原始採集 | `01_collect.py cluster` | `output/01_raw/<run>/<exchange>/` 的合併 JSONL；以 `export-csv` 按需產生原生 channel CSV.gz |
-| 02 正規化 | `02_normalize_tardis_<交易所>.py` | `output/02_tardis/<run>/<交易所>/` |
-| 03 對帳 | `03_compare_tardis.py` | `output/03_comparison/<run>/` |
+| 01 原始採集 | `01_collector/01_collect.py cluster` | `01_collector/output/raw/<run>/<exchange>/` 的合併 JSONL；以 `export-csv` 按需產生原生 channel CSV.gz |
+| 02 正規化 | `02_normalize_tardis/02_normalize_tardis.py --exchange <交易所>` | `02_normalize_tardis/output/<run>/<交易所>/` |
+| 03 對帳 | `03_compare/03_compare_tardis.py` | `03_compare/output/<run>/` |
 
 第一次運行請看[五家交易所操作指南](RUN_01_02.md)。可選一家或多家做 30 秒短測、同時啟動長期採集，並逐家匯出原生 channel CSV。五家可分別執行第 02 階段產生 Tardis CSV。
 
 ## 啟動 Docker 採集
 
-從 Git 建置映像、執行 30 秒短測、啟停正式採集及掛載資料卷的步驟見 [Docker 部署指南](DOCKER_DEPLOYMENT.md)。
+從 Git 建置映像、執行 30 秒短測、啟停正式採集及掛載資料卷的步驟見 [Docker 部署指南](01_collector/DOCKER_DEPLOYMENT.md)。
 
 本版五家短測、CSV 逐位元組驗證、封存與資源實測見[按需匯出驗收](evidence/ondemand_20261125T204054/README.md)。
 
@@ -31,13 +31,13 @@
 }
 ```
 
-這是完整 `settings.json` 中的配置片段，其他連線、REST 與儲存設定仍保留。沒有 `exchanges` 的舊設定可以讀取；新版每個市場可以使用不同商品及 channel。
+這是完整 `01_collector/settings.json` 中的配置片段，其他連線、REST 與儲存設定仍保留。沒有 `exchanges` 的舊設定可以讀取；新版每個市場可以使用不同商品及 channel。
 
-`01_collect.py cluster` 在每個 worker 內，依市場、原生 WS channel 及路由分組。每個 channel 為 BTC、ETH 各開專線，其餘商品共用一條 WS；只建立有訂閱的組。每組裝滿 `redundancy.group_size` 與交易所訂閱上限中較小的數量後，才開下一條。A、B 與換代候選使用相同分組。
+`01_collector/01_collect.py cluster` 在每個 worker 內，依市場、原生 WS channel 及路由分組。每個 channel 為 BTC、ETH 各開專線，其餘商品共用一條 WS；只建立有訂閱的組。每組裝滿 `redundancy.group_size` 與交易所訂閱上限中較小的數量後，才開下一條。A、B 與換代候選使用相同分組。
 
 例如預設 Binance 期貨 `bookTicker` 每個 worker 有三條 WS，分別訂閱 `BTCUSDT`、`ETHUSDT`、`GRTUSDT + SOLUSDT`。新增一般商品只需加入該市場的 `symbols`。以基礎資產判斷分組，例如 Upbit 的 `BTC-SOL` 屬於其餘商品。Binance、Bybit 若新增使用特殊報價幣的連寫商品，可在該市場明確指定 `"base_assets": {"BTCXYZ": "BTC"}`。同一基礎資產的不同報價交易對會進入同一資產組。
 
-可用 `python 01_collect.py cluster --exchange binance --output /tmp/ws-layout --dry-run` 檢查 `groups` 中每條 WS 的 ID 及完整商品名單。運行日誌中的 `connect_attempt` 會記錄相同 ID，例如 `binance-futures/bookTicker/others/0`。改版部署或變更商品後使用新 run 目錄。
+可用 `python 01_collector/01_collect.py cluster --exchange binance --output /tmp/ws-layout --dry-run` 檢查 `groups` 中每條 WS 的 ID 及完整商品名單。運行日誌中的 `connect_attempt` 會記錄相同 ID，例如 `binance-futures/bookTicker/others/0`。改版部署或變更商品後使用新 run 目錄。
 
 | 交易所主管 | 市場 ID | 預設商品 | 每商品原生 channel 數 |
 |---|---|---|---|
@@ -49,7 +49,7 @@
 
 Binance 預設每天為 48 個原生 channel CSV；五家合計 123 個，包含只有 header 的靜默來源。這與第 02 階段的 32 組 Binance Tardis CSV 是不同輸出。
 
-完整現有 channel 由各 adapter 的 `channels()` 宣告。JSON 尚未實作來源及歷史別名列於 [SOURCE_COVERAGE.md](SOURCE_COVERAGE.md)，本次不擴充那些來源。Binance 的公開來源不要求交易帳戶；本程式不使用私人交易端點或付費資料端點。
+完整現有 channel 由各 adapter 的 `channels()` 宣告。JSON 尚未實作來源及歷史別名列於 [SOURCE_COVERAGE.md](01_collector/SOURCE_COVERAGE.md)，本次不擴充那些來源。Binance 的公開來源不要求交易帳戶；本程式不使用私人交易端點或付費資料端點。
 
 ## Supervisor 與 worker 如何維護
 
@@ -94,8 +94,8 @@ CSV 仍一個原始 channel 一個檔案，按**接收時間 UTC 日期**分檔�
 採集與停止排空都只寫原始資料。需要分析時，對每個交易所執行一次下列命令。同一個輸出目錄可以重複使用。若工作流程按日對帳，可在每日 UTC 00:05 執行同一命令；這是建議的呼叫時機，程式本身不建立排程。第 02 階段直接讀 JSONL，可略過原生 CSV 匯出。
 
 ```bash
-python 01_collect.py export-csv --input "$DATA_ROOT/binance" \
-  --output "$PWD/output/01_channels/run-001/binance"
+python 01_collector/01_collect.py export-csv --input "$DATA_ROOT/binance" \
+  --output "$PWD/01_collector/output/channels/run-001/binance"
 ```
 
 輸出位於 `<output>/<market>/<symbol>/<接收 UTC 日期>/<channel>.csv.gz`。每次只讀開始時已封存的 JSONL，採集中與停止後均可執行；當前的 `.part` 留到下次。資料直接寫為 gzip，連今天的檔案也不必保留未壓縮副本。跨日遲到只在舊日期檔追加新的 gzip 成員，解壓後沿用原表頭與提交順序。首次遇到新日期會補齊靜默來源表頭。
@@ -106,15 +106,15 @@ python 01_collect.py export-csv --input "$DATA_ROOT/binance" \
 
 ```bash
 docker run --rm --network none -v "$COLLECTOR_VOLUME:/input:ro" \
-  -v "$PWD/output/01_channels/run-002/binance:/export" market-collector:local \
-  python /app/step2/01_collect.py export-csv --input /input --output /export
+  -v "$PWD/01_collector/output/channels/run-002/binance:/export" market-collector:local \
+  python /app/step2/01_collector/01_collect.py export-csv --input /input --output /export
 ```
 
 停止採集後可重播到新目錄，預設拒絕覆寫：
 
 ```bash
-python 01_collect.py replay --input output/01_raw/run-001/binance \
-  --output output/01_raw/replay-001
+python 01_collector/01_collect.py replay --input 01_collector/output/raw/run-001/binance \
+  --output 01_collector/output/raw/replay-001
 ```
 
 不正常結束先用相同版本啟動主管恢復；純離線恢復可用 `--recover`，只讀已提交偏移以內的完整資料。第 1 版 raw、第 2 版 gzip raw 讀取仍保留。`run`／`supervise` 是舊單程序相容命令，不具備雙副本整合；新部署使用 `cluster`。無 Docker 時可用 `cluster --backend local --duration 30` 作同入口的短測。
@@ -138,34 +138,46 @@ REST 租約與配額跨 A/B/C 共用，換代不重置。Binance 以 exchangeInf
 ## 第 02／03 階段
 
 ```bash
-python 02_normalize_tardis_binance.py --input output/01_raw/run-001/binance \
-  --output output/02_tardis/run-001/binance
-python 03_compare_tardis.py --help
+python 02_normalize_tardis/02_normalize_tardis.py --exchange binance --input 01_collector/output/raw/run-001/binance \
+  --output 02_normalize_tardis/output/run-001/binance
+python 03_compare/03_compare_tardis.py --help
 ```
 
 入口的交易所名稱為 `binance`、`bybit`、`okx`、`coinbase`、`upbit`。每家使用各自的原生欄位、成交方向、事件時間及訂單簿協議。Binance 沿用 REST 快照與 WS 深度接合，序號缺口後等待新快照。Bybit、OKX 和 Coinbase 各自區分原生一檔行情與由 L2 推導的 quotes。Upbit 的 quotes 取自完整 orderbook 快照。按市場列出的資料類型、來源差異及 Docker 命令見[五家交易所操作指南](RUN_01_02.md)。
 
-正規化報告記錄上游 commit、本地程式雜湊、行數及來源限制。欄位、快照、時間及去重差異見[原碼核對紀錄](reference/README.md)。
+正規化報告記錄上游 commit、本地程式雜湊、行數及來源限制。欄位、快照、時間及去重差異見[原碼核對紀錄](02_normalize_tardis/reference/README.md)。
 
 ## 程式分工與測試
 
+以下命令以 `tardis_sample/step2/` 為工作目錄。三個階段各有自己的 `output/`，共用程式與測試放在 `common/`、`tests/`。官方參考資料保留在 `../datasets/`。
+
+| 舊資料目錄 | 新資料目錄 |
+|---|---|
+| `output/01_raw/` | `01_collector/output/raw/` |
+| `output/01_channels/` | `01_collector/output/channels/` |
+| `output/02_tardis/` | `02_normalize_tardis/output/` |
+| `output/03_comparison/` | `03_compare/output/` |
+
+外部腳本及 systemd 請使用新入口。部署升級時先停止並排空舊主管，再為新版指定新批次路徑，讓既有批次可照常離線重播。歷史 manifest、日誌和報告保留原始路徑記錄。重播歷史資料時請直接將搬移後的 run 路徑傳給 `--input`。
+
 | 檔案 | 職責 |
 |---|---|
-| `01_collect.py` | 採集、按需原生 CSV 匯出、重播及舊命令相容 |
+| `01_collector/01_collect.py` | 採集、按需原生 CSV 匯出及重播 |
 | `redundancy.py` | 交易所分組、配置、來源與版本身分 |
 | `supervisor.py`、`container_runtime.py` | IPC 接管、容器管理與滾動換代 |
 | `worker.py` | 所有 A/B/C 共用收訊、心跳與重送 |
 | `delivery.py` | spool、JSONL 提交、SQLite 去重／恢復 |
 | `replica_protocol.py`、`replica_monitor.py` | 原生事件拆分、身分、覆蓋與交接證據 |
 | `rest_schedule.py` | 持久共用配額、輪詢、租約與路由 |
-| `channel_export.py`、`raw.py` | 按需增量壓縮 CSV、原始格式與歷史重播 |
+| `01_collector/channel_export.py`、`01_collector/raw.py` | 按需增量壓縮 CSV、原始資料寫入與匯出 |
+| `common/raw_reader.py`、`common/protocol.py` | 三版原始紀錄讀取、解碼與訊息分類 |
 | `retention.py` | 無損壓縮、熱／歷史索引封存與崩潰邊界 |
 | `collectors/*.py` | 五家交易所各自的協議規則 |
-| `02_normalize_tardis_<交易所>.py`、`03_compare_tardis.py` | 獨立正規化與對帳 |
+| `02_normalize_tardis/02_normalize_tardis.py --exchange <交易所>`、`03_compare/03_compare_tardis.py` | 獨立正規化與對帳 |
 
 ```bash
 python -m unittest discover -s tests -v
-python 01_collect.py cluster --exchange binance --output /tmp/unused --dry-run
+python 01_collector/01_collect.py cluster --exchange binance --output /tmp/unused --dry-run
 ```
 
 固定測試涵蓋五家 ACK／心跳／原生身分、批次部分重疊、序號重置、雙路缺口、ACK 遺失重送、主管恢復、磁碟與容量故障、CSV 重播及 501 商品配額。每個自行維護函式最多 50 行，函式開頭與關鍵行使用繁體中文註解，亦有風格測試。
@@ -178,7 +190,7 @@ python 01_collect.py cluster --exchange binance --output /tmp/unused --dry-run
 
 ```bash
 # 不連交易所、不啟動 Docker；先檢查換代阻礙與設定配額下的初始化窗口。
-python 01_collect.py cluster --exchange binance --output /tmp/collector-preflight --dry-run
+python 01_collector/01_collect.py cluster --exchange binance --output /tmp/collector-preflight --dry-run
 ```
 
 主管獨立將封存 JSONL 以 gzip 無損壓縮；驗證解壓 SHA-256、同步檔案與目錄，再移除未壓縮副本。壓縮中斷保留原檔，離線 reader 不會重複讀兩個副本。第三版仍保留原始接收時間、行順序與 payload；第 02／03 階段介面不變。

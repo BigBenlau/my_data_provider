@@ -1,7 +1,7 @@
 """雙副本框架的固定事件、崩潰邊界、配額與交接驗收。"""
 import asyncio
 import gzip
-import importlib.util
+import importlib
 import json
 from pathlib import Path
 import sqlite3
@@ -11,14 +11,27 @@ import time
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import adapter, atomic_json
-from redundancy import group_config, identity, DEFAULTS, configured_feeds, feed_groups
-from delivery import Spool, MergeStore, read_packet, write_packet
-from replica_protocol import atoms, classify_group, subscription
-from replica_monitor import Monitor
-from rest_schedule import Schedule
-from channel_export import Exporter
-from raw import read_records, export_channels, StorageError
+from common import atomic_json
+
+adapter = importlib.import_module("01_collector.transport").adapter
+group_config = importlib.import_module("01_collector.redundancy").group_config
+identity = importlib.import_module("01_collector.redundancy").identity
+DEFAULTS = importlib.import_module("01_collector.redundancy").DEFAULTS
+configured_feeds = importlib.import_module("01_collector.redundancy").configured_feeds
+feed_groups = importlib.import_module("01_collector.redundancy").feed_groups
+Spool = importlib.import_module("01_collector.delivery").Spool
+MergeStore = importlib.import_module("01_collector.delivery").MergeStore
+read_packet = importlib.import_module("01_collector.delivery").read_packet
+write_packet = importlib.import_module("01_collector.delivery").write_packet
+atoms = importlib.import_module("01_collector.replica_protocol").atoms
+classify_group = importlib.import_module("01_collector.replica_protocol").classify_group
+subscription = importlib.import_module("01_collector.replica_protocol").subscription
+Monitor = importlib.import_module("01_collector.replica_monitor").Monitor
+Schedule = importlib.import_module("01_collector.rest_schedule").Schedule
+Exporter = importlib.import_module("01_collector.channel_export").Exporter
+from common.raw_reader import read_records
+export_channels = importlib.import_module("01_collector.raw").export_channels
+StorageError = importlib.import_module("01_collector.raw").StorageError
 
 
 def config(family='binance'):
@@ -290,7 +303,7 @@ class CapacityTests(unittest.TestCase):
             summary = {r['channel']: r for r in a.capacity_summary()}
             self.assertEqual(summary['openInterest']['symbols'], 501)
             self.assertEqual(summary['openInterest']['interval'], oi)
-            from supervisor import Supervisor
+            Supervisor = importlib.import_module("01_collector.supervisor").Supervisor
             from types import SimpleNamespace
             target = SimpleNamespace(config=value, schedule=a, capacity_state=None)
             with self.assertLogs('market-data', level='WARNING') as logs: Supervisor.capacity_log(target)
@@ -340,9 +353,7 @@ class HandoverTests(unittest.TestCase):
 
     def test_merged_snapshot_mapping_after_worker_switch(self):
         # 第三版只用邏輯 session 與請求邊界，副本切換不清掉有效訂單簿。
-        path = Path(__file__).resolve().parents[1] / '02_normalize_tardis.py'
-        spec = importlib.util.spec_from_file_location('mapped_replica_test', path)
-        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        module = importlib.import_module('02_normalize_tardis.mappers.binance')
         db = sqlite3.connect(':memory:'); mapper = module.Mapper(db)
         first = dict(event('depth@0ms', 10, local=1100000), merged=True, session='merged')
         self.assertEqual(mapper.consume(first), [])
@@ -360,7 +371,7 @@ class DockerRuntimeTests(unittest.IsolatedAsyncioTestCase):
     """容器 API 的映像與命令一致性可在沒有 daemon 時先做固定驗證。"""
     async def test_image_mismatch_refused_and_same_entrypoint(self):
         # 不同映像的既有容器不可接管；所有 worker 只改執行期名稱。
-        from container_runtime import Runtime
+        Runtime = importlib.import_module("01_collector.container_runtime").Runtime
         from unittest.mock import AsyncMock
         with tempfile.TemporaryDirectory() as root:
             value = config(); runtime = Runtime(root, value, 'docker', 'tag')
@@ -368,6 +379,7 @@ class DockerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime.api = AsyncMock(return_value={'Id': 'container', 'Image': 'sha256:other'})
             with self.assertRaises(ValueError): await runtime.start_container('a')
             left = runtime.command('a', '/data'); right = runtime.command('b', '/data')
+            self.assertEqual(left[2], '/app/step2/01_collector/01_collect.py')
             self.assertEqual([x for x in left if x != 'a'], [x for x in right if x != 'b'])
 
 
@@ -383,7 +395,7 @@ class LocalRuntime:
 
     async def start(self, worker):
         # 生命週期與交付都走正式程式，只有外部行情使用固定伺服器。
-        from worker import Worker
+        Worker = importlib.import_module("01_collector.worker").Worker
         instance = Worker(self.root, self.config, worker, self.image)
         self.tasks[worker] = asyncio.create_task(instance.execute())
 
@@ -446,7 +458,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_five_markets_dual_workers_and_candidate_rejection(self):
         # 五個 adapter 共用同一實際框架，單路斷線及失格候選不停止另一條。
-        from supervisor import Supervisor
+        Supervisor = importlib.import_module("01_collector.supervisor").Supervisor
         runner, port = await self.start_fixture()
         try:
             for market in ('binance-futures', 'bybit', 'okex', 'coinbase', 'upbit'):
@@ -464,7 +476,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_supervisor_restart_workers_buffer_then_replay(self):
         # 主管停止服務時 worker 繼續落盤；新主管接管後消除重送並清理緩衝。
-        from supervisor import Supervisor
+        Supervisor = importlib.import_module("01_collector.supervisor").Supervisor
         runner, port = await self.start_fixture()
         try:
             with tempfile.TemporaryDirectory() as root:
