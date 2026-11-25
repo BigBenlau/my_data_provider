@@ -8,7 +8,7 @@
 | 02 正規化 | `02_normalize_tardis.py` | `output/02_tardis/<run>/`，目前只支援 Binance |
 | 03 對帳 | `03_compare_tardis.py` | `output/03_comparison/<run>/` |
 
-第一次運行請看[從 01 採集到 02 生成 Tardis CSV](RUN_01_02.md)。指南使用同一個 Binance 批次完成 30 秒採集、停止排空、離線正規化與結果檢查。
+第一次運行請看[五家交易所操作指南](RUN_01_02.md)。可選一家或多家做 30 秒短測、同時啟動長期採集，並逐家匯出原生 channel CSV。Binance 批次另可接續第 02 階段產生 Tardis CSV。
 
 ## 啟動 Docker 採集
 
