@@ -2,8 +2,8 @@
 name: step2
 
 x-supervisor: &supervisor
-  image: market-collector:local
-  build:
+  image: &collector-image market-collector:local
+  build: &collector-build
     context: ../..
     dockerfile: step2/Dockerfile
   restart: unless-stopped
@@ -18,6 +18,10 @@ x-supervisor: &supervisor
       max-file: '3'
 
 services:
+  collector:
+    profiles: [build]
+    image: *collector-image
+    build: *collector-build
   binance:
     <<: *supervisor
     command: [python, /app/step2/01_collector/01_collect.py, cluster, --exchange, binance, --output, /data, --host-output, '${DATA_ROOT:?set absolute DATA_ROOT}/binance']

@@ -3,6 +3,7 @@ import asyncio
 import base64
 from collections import Counter, deque
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 from importlib import import_module
 import json
 import logging
@@ -20,8 +21,6 @@ from common.protocol import ADAPTERS
 
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 METADATA = STEP2_ROOT.parent / 'exchange_info'
-SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'GRTUSDT']
-MARKETS = ['binance', 'binance-futures']
 
 
 def proxy_url(setting):
@@ -33,6 +32,7 @@ def proxy_url(setting):
     return setting
 
 
+@lru_cache(maxsize=None)
 def adapter(market):
     # 依市場 ID 載入專屬 Collector，避免將不相容協議混入共用傳輸層。
     return import_module(f'.collectors.{ADAPTERS[market]}', __package__).Collector
@@ -47,10 +47,10 @@ def configuration(path=None, markets=None, symbols=None):
     selected = settings['markets']
     if not selected or not set(selected) <= ADAPTERS.keys() or len(selected) != len(set(selected)):
         raise ValueError('unknown or duplicate markets')
-    if len(selected) > 1 and not set(selected) <= set(MARKETS):
-        raise ValueError('run non-Binance markets separately; symbol/protocol conventions differ')
-    settings['symbols'] = symbols or (settings['symbols'] if set(selected) <= set(MARKETS)
-                                     else adapter(selected[0]).default_symbols(selected[0]))
+    cls = adapter(selected[0])
+    if len(selected) > 1 and (not cls.legacy_multi_market or any(adapter(m) is not cls for m in selected)):
+        raise ValueError('run these markets separately; symbol/protocol conventions differ')
+    settings['symbols'] = symbols or cls.legacy_symbols(settings, selected[0])
     if not settings['symbols'] or len(settings['symbols']) != len(set(settings['symbols'])):
         raise ValueError('empty or duplicate symbols')
     if any(not s.isascii() or not s.replace('-', '').isalnum() for s in settings['symbols']):
@@ -126,6 +126,47 @@ class BaseCollector:
     continuity_channels = {}
     replica_silence_seconds = {}
     connection_limits = ((300, 150),)
+    legacy_multi_market = False
+    optional_channels = ()
+    probe_channels = ()
+    native_fields = {}
+    variant_fields = {}
+    rest_policy = None
+    time_unit = 'ms'
+    batch_field = None
+    unwrap_single = False
+
+    @classmethod
+    def feeds(cls, config, market):
+        # 同一路由的商品和頻道共用展開方式，端點及事件時間單位由交易所提供。
+        return [dict(exchange=market, symbol=symbol, channel=channel, time_unit=cls.time_unit,
+                     urls=cls.endpoints(market))
+                for symbol in config['symbols'] for channel in cls.channels(market)]
+
+    @classmethod
+    def subscription(cls, feed):
+        # 單路與分組連線共用同一份原生訂閱格式。
+        return cls.replica_subscription([feed])
+
+    @classmethod
+    def legacy_symbols(cls, config, market):
+        # 舊設定未指定交易所商品時，由該市場提供預設值。
+        return cls.default_symbols(market)
+
+    def polling_tasks(self, config):
+        # 只有宣告輪詢的交易所需要建立額外任務。
+        return []
+
+    @staticmethod
+    def control_fields(feed, obj):
+        # 有應用層心跳的交易所可回傳要更新的觀察欄位。
+        return None
+
+    @staticmethod
+    def validate_event(data, channel, symbol):
+        # 有欄位驗證規則的市場可在建立事件身分前檢查原文。
+        pass
+
     @staticmethod
     def ws_asset(symbol):
         # 有分隔符的市場以第一段為基礎資產，例如 BTC-USDT-SWAP。
@@ -199,9 +240,14 @@ class BaseCollector:
     def stale_limit(self,feed):
         # 依來源設定資料新鮮度門檻；清算沒有事件時不套用行情靜默限制。
         ch=feed['channel']
-        if ch in ('forceOrder','allLiquidation'): return None
-        if feed['exchange'] in MARKETS: return self.config['stale_seconds'].get('depth' if ch.startswith('depth@') else ch)
-        return 120  # 示範來源的新鮮度警示，不直接證明序號缺口。
+        return None if ch in self.optional_channels else 120
+
+    def source_healthy(self, market, channel, state, age):
+        # 一般來源必須已訂閱並收到行情，稀少事件則允許靜默。
+        limit = self.stale_limit(dict(exchange=market, channel=channel))
+        fresh = age is not None and (limit is None or age <= limit)
+        return state['connected'] and state['subscribed'] and (channel in self.optional_channels or fresh)
+
     async def stream(self, feed, offset=0):
         # 每條來源獨立重連；只有收到有效資料的穩定連線才重設退避次數。
         await asyncio.sleep(offset)
@@ -312,11 +358,7 @@ class BaseCollector:
         now=time.monotonic(); items={}; issues=[]
         for k,s in self.stats.items():
             market,symbol,ch=k.split('/'); age=now-s['last_valid_mono'] if s['last_valid_mono'] else None
-            limit=self.stale_limit(dict(exchange=market,channel=ch)); silent=ch in ('forceOrder','allLiquidation')
-            good=s['connected'] and s['subscribed'] and (silent or (age is not None and (limit is None or age<=limit)))
-            if ch=='openInterest': good=s['connected'] and age is not None and age<=self.config['stale_seconds']['openInterest']
-            if ch=='depthSnapshot':
-                good=age is not None and age<=self.config['snapshot_interval']+self.config['rest_timeout']
+            good = self.source_healthy(market, ch, s, age)
             items[k]={a:b for a,b in s.items() if a!='last_valid_mono'}|{'last_valid_age_s':age,'healthy':good}
             if not good: issues.append(k)
         return {'updated_us':time.time_ns()//1000,'pid':os.getpid(),'elapsed_s':now-self.start,'capability':self.capability,

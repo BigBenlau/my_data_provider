@@ -13,6 +13,7 @@ from .redundancy import group_config, identity, local_paths
 from .replica_monitor import Monitor
 from .rest_schedule import Schedule
 from .container_runtime import Runtime
+from .transport import adapter
 from .retention import compress_ready
 
 
@@ -207,7 +208,7 @@ class Supervisor:
         for row in state:
             LOG.info('event=source_warmup market=%s channel=%s remaining=%s initial_per_minute=%s budget_windows=%s',
                      row['market'], row['channel'], row['warming_symbols'], row['initial_per_minute'], row['warming_budget_windows'])
-            requested = self.config['oi_interval'] if row['channel'] == 'openInterest' else self.config['snapshot_interval']
+            requested = adapter(row['market']).rest_policy.requested_interval(self.config, row['channel'])
             if row['interval'] > requested:
                 LOG.warning('event=rest_capacity_adjusted market=%s channel=%s symbols=%s requested_s=%s effective_s=%s budget_per_min=%s',
                             row['market'], row['channel'], row['symbols'], requested, row['interval'], row['capacity'])

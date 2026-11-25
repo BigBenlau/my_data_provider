@@ -1,6 +1,6 @@
 # Docker 部署採集器
 
-每家交易所由一個 supervisor 管理兩個 worker。五家服務共用相同映像。商品與原生 channel 由 `settings.json` 的 `exchanges.<交易所>.markets` 指定。[採集設定](settings.json) · [Compose 服務](compose.yaml)
+每家交易所由一個 supervisor 管理兩個 worker。五家服務共用映像 `market-collector:local`，使用 `--exchange` 選取協議。建置入口 `collector` 屬於 `build` profile，日常啟動的服務是五個交易所 supervisor。商品與原生 channel 由 `settings.json` 的 `exchanges.<交易所>.markets` 指定。[採集設定](settings.json) · [Compose 服務](compose.yaml)
 
 五家交易所的服務名稱、市場 ID、批量啟停與各自可用的 CSV 格式見 [五家交易所操作指南](../RUN_01_02.md)。
 
@@ -17,7 +17,7 @@ export EXCHANGE=okx
 
 # 檢查 Compose 設定並建立共用映像。
 docker compose config --quiet
-docker compose build "$EXCHANGE"
+docker compose build collector
 
 # 先做單組短測，worker 會隨主管正常結束而排空停止。
 docker compose run --rm "$EXCHANGE" \
@@ -37,11 +37,15 @@ export DATA_ROOT="$PWD/output/raw/run-001"
 docker compose up -d "$EXCHANGE"
 
 docker compose logs -f "$EXCHANGE"
+# 只列出這家交易所的 worker，包含換代期間的候選者。
+docker ps --filter "label=collector.exchange=$EXCHANGE" --format '{{.Names}}'
 # 正常停止會要求 worker 停止收訊、排空交付後移除容器。
 docker compose stop "$EXCHANGE"
 ```
 
 `DATA_ROOT` 必須是 Docker 主機的絕對路徑，並使用本機磁碟。容器內是 `/data`。`--host-output` 供主管建立 worker 的相同 bind mount。SQLite WAL 不支援把本資料目錄放在 NFS 等網路檔案系統。Docker socket 只掛載主管，具有主機容器管理權限，應部署在可信的專用主機。
+
+新 worker 的 Docker 名稱是 `collector-<交易所>-<批次識別>-<worker ID>`。六碼批次識別來自資料目錄或 volume 名稱，同批次各副本的最後一段不同。主管把實際名稱寫在該批次的 `_state/runtime.json`，重啟可依登記名稱接管。現有容器沿用建立時的名稱與標籤，新版批次建立的 worker 會帶有 `collector.exchange` 標籤。
 
 主管啟動時解析本機映像的 immutable SHA-256 image ID。換代一律使用該 ID，不執行 pull。不符合映像、程式雜湊或採集設定雜湊的 worker 拒絕加入。程式升級與設定變更使用新的輸出 run。不要在已有資料目錄上混用不同版本。
 

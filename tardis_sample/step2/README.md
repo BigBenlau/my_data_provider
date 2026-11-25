@@ -170,9 +170,10 @@ python 03_compare/03_compare_tardis.py --help
 | `replica_protocol.py`、`replica_monitor.py` | 原生事件拆分、身分、覆蓋與交接證據 |
 | `rest_schedule.py` | 持久共用配額、輪詢、租約與路由 |
 | `01_collector/channel_export.py`、`01_collector/raw.py` | 按需增量壓縮 CSV、原始資料寫入與匯出 |
-| `common/raw_reader.py`、`common/protocol.py` | 三版原始紀錄讀取、解碼與訊息分類 |
+| `common/raw_reader.py`、`common/protocol.py` | 三版原始紀錄讀取、JSON 解碼與市場對應表 |
+| `common/<交易所>.py` | 採集和離線重播共用的原生訊息分類及欄位辨識 |
 | `retention.py` | 無損壓縮、熱／歷史索引封存與崩潰邊界 |
-| `collectors/*.py` | 五家交易所各自的協議規則 |
+| `01_collector/collectors/<交易所>.py` | 各家訂閱、心跳、事件身分、批次拆分與差異判定；Binance 的 REST 配額與原生 CSV 欄位也在此宣告 |
 | `02_normalize_tardis/02_normalize_tardis.py --exchange <交易所>`、`03_compare/03_compare_tardis.py` | 獨立正規化與對帳 |
 
 ```bash

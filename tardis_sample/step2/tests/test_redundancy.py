@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import atomic_json
 
@@ -369,10 +369,78 @@ class HandoverTests(unittest.TestCase):
 
 class DockerRuntimeTests(unittest.IsolatedAsyncioTestCase):
     """容器 API 的映像與命令一致性可在沒有 daemon 時先做固定驗證。"""
+    async def test_worker_names_and_exchange_labels(self):
+        # 五家使用同一映像，容器名稱能區分交易所、資料批次與同批次的多個副本。
+        Runtime = importlib.import_module("01_collector.container_runtime").Runtime
+        names = set()
+        with tempfile.TemporaryDirectory() as root:
+            for family in ('binance', 'bybit', 'okx', 'coinbase', 'upbit'):
+                value = config(family)
+                for batch in ('run-001', 'run-002'):
+                    runtime = Runtime(Path(root) / batch, value, 'docker', 'market-collector:local')
+                    runtime.image = 'sha256:shared'
+                    for worker in ('abcd12345678', 'bcde23456789'):
+                        runtime.api = AsyncMock(return_value={})
+                        await runtime.start_container(worker)
+                        name = runtime.entries[worker]['name']
+                        self.assertRegex(name, f'^collector-{family}-[0-9a-f]{{6}}-{worker}$')
+                        self.assertNotIn(name, names)
+                        names.add(name)
+                        method, path, body = runtime.api.await_args_list[1].args
+                        self.assertEqual((method, path), ('POST', '/containers/create?name=' + name))
+                        self.assertEqual(body['Labels'], {'collector.exchange': family,
+                                         'collector.group': value['config_hash'], 'collector.worker': worker})
+                        self.assertEqual(body['Image'], runtime.image)
+                        self.assertEqual(body['Cmd'], runtime.command(worker, '/data'))
+
+    async def test_resume_registered_legacy_name(self):
+        # 從磁碟讀取舊名稱，已啟動的副本直接接管，已停止的只啟動同一個容器。
+        Runtime = importlib.import_module("01_collector.container_runtime").Runtime
+        with tempfile.TemporaryDirectory() as root:
+            worker, legacy, image = 'a', 'collector-01234567-abcdef-a', 'sha256:shared'
+            state = Path(root) / '_state'
+            state.mkdir()
+            atomic_json(state / 'runtime.json', {worker: {'name': legacy, 'image': image}})
+            value = config()
+            labels = {'collector.group': value['config_hash'], 'collector.worker': worker}
+            for running in (True, False):
+                runtime = Runtime(root, value, 'docker', 'tag')
+                runtime.image = image
+                info = dict(Id='container', Image=image, Config=dict(Labels=labels), State=dict(Running=running))
+                runtime.api = AsyncMock(side_effect=[info, None])
+                await runtime.start_container(worker)
+                paths = [call.args[1] for call in runtime.api.await_args_list]
+                expected = ['/containers/' + legacy + '/json']
+                if not running:
+                    expected.append('/containers/' + legacy + '/start')
+                self.assertEqual(paths, expected)
+                self.assertEqual(runtime.entries[worker]['name'], legacy)
+
+    async def test_missing_legacy_container_uses_new_name(self):
+        # 已登記的舊容器若已消失，先查新名稱才建立，重試時可接管已建立的容器。
+        Runtime = importlib.import_module("01_collector.container_runtime").Runtime
+        with tempfile.TemporaryDirectory() as root:
+            value = config('okx')
+            runtime = Runtime(root, value, 'docker', 'tag')
+            runtime.image = 'sha256:shared'
+            worker, legacy = '123456789abc', 'collector-01234567-abcdef-123456789abc'
+            name = runtime.prefix + worker
+            labels = {'collector.group': value['config_hash'], 'collector.worker': worker}
+            found = dict(Id='container', Image=runtime.image, Config=dict(Labels=labels), State=dict(Running=True))
+            for existing in ({}, found):
+                runtime.entries[worker] = dict(name=legacy, image=runtime.image)
+                runtime.api = AsyncMock(side_effect=[{}, existing, {}, {}])
+                await runtime.start_container(worker)
+                paths = [call.args[1] for call in runtime.api.await_args_list]
+                expected = ['/containers/' + legacy + '/json', '/containers/' + name + '/json']
+                if not existing:
+                    expected.extend(['/containers/create?name=' + name, '/containers/' + name + '/start'])
+                self.assertEqual(paths, expected)
+                self.assertEqual(runtime.entries[worker]['name'], name)
+
     async def test_image_mismatch_refused_and_same_entrypoint(self):
         # 不同映像的既有容器不可接管；所有 worker 只改執行期名稱。
         Runtime = importlib.import_module("01_collector.container_runtime").Runtime
-        from unittest.mock import AsyncMock
         with tempfile.TemporaryDirectory() as root:
             value = config(); runtime = Runtime(root, value, 'docker', 'tag')
             runtime.image = 'sha256:expected'

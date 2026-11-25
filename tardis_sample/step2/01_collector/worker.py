@@ -79,17 +79,19 @@ class Worker:
         for feed in group['feeds']: self.stats[key(feed)]['connected'] = True
         await ws.send_json(subscription(group))
         started = last_ping = last_app = time.monotonic(); pong_deadline = None
+        feed = group['feeds'][0]
+        cls = adapter(feed['exchange'])
         receive = asyncio.create_task(ws.receive()); count = 0
         try:
             while not self.stop.is_set():
                 now = time.monotonic()
-                if not count and now - started > 20 and group['feeds'][0]['channel'] in ('trade', 'bookTicker', 'depth@0ms', 'depth@100ms', 'ticker', 'markPrice@1s'):
+                if not count and now - started > 20 and feed['channel'] in cls.probe_channels:
                     raise TimeoutError('route_probe_no_matching_data')
                 if self.repair_due(group, session): raise ValueError('peer_ahead_repair')
                 if pong_deadline and now > pong_deadline: raise TimeoutError('ping_timeout')
                 if now - last_ping >= 20:
                     await ws.ping(); last_ping = now; pong_deadline = now + 10
-                heartbeat = adapter(group['feeds'][0]['exchange']).application_heartbeat
+                heartbeat = cls.application_heartbeat
                 if heartbeat and now - last_app >= 20:
                     await ws.send_str(heartbeat); last_app = now
                 done, _ = await asyncio.wait([receive], timeout=.5)
@@ -155,14 +157,13 @@ class Worker:
         return 1
 
     def application_control(self, group, obj):
-        # Coinbase 心跳保留原生交易進度作觀察，不能把全市場序號當作連續成交序號。
-        if not isinstance(obj, dict): return
-        if obj.get('type') == 'heartbeat':
-            for feed in group['feeds']:
-                if feed['symbol'] == obj.get('product_id'):
-                    self.stats[key(feed)].update(last_control_us=time.time_ns() // 1000,
-                                                 heartbeat_trade_id=obj.get('last_trade_id'), heartbeat_sequence=obj.get('sequence'))
-        elif obj.get('op') == 'pong' or obj.get('ret_msg') == 'pong': self.control(group)
+        # 交易所辨識應用層控制資料，傳輸層只維護觀察時間。
+        if not isinstance(obj, dict):
+            return
+        for feed in group['feeds']:
+            fields = adapter(feed['exchange']).control_fields(feed, obj)
+            if fields is not None:
+                self.stats[key(feed)].update(fields, last_control_us=time.time_ns() // 1000)
 
     async def rest_loop(self):
         # 租約與預算跨副本共用；只有本次 claim 的 worker 發送請求。
@@ -178,8 +179,7 @@ class Worker:
 
     def rest_ready(self, market, symbol, channel):
         # 初始及定期深度快照都必須晚於本路訂閱收訊，否則快照無法銜接。
-        if channel != 'depthSnapshot': return True
-        depth = 'depth@100ms' if market == 'binance' else 'depth@0ms'
+        depth = adapter(market).rest_policy.dependency(market, channel)
         if depth not in self.config['market_settings'][market]['channels']: return True
         state = self.stats.get('/'.join((market, symbol, depth)), {})
         return bool(state.get('connected') and state.get('subscribed') and state.get('last_data_us'))
@@ -187,26 +187,24 @@ class Worker:
     async def request(self, job):
         # REST 原文與請求邊界一起保存，供離線 mapper 重建快照前緩存。
         channel, market = job['channel'], job['market']
-        suffix = '/depth' if channel == 'depthSnapshot' else '/' + channel
-        endpoint = self.config['rest'][market] + suffix
-        params = {'symbol': job['symbol']} if job['symbol'] else {}
-        if channel == 'depthSnapshot': params['limit'] = 1000
+        policy = adapter(market).rest_policy
+        endpoint, params = policy.request(self.config, market, job['symbol'], channel)
         started = time.time_ns() // 1000
         async with self.rest_http.get(endpoint, params=params, proxy=self.proxy,
                 timeout=aiohttp.ClientTimeout(total=self.config['rest_timeout'])) as response:
             raw = await response.text(); received = time.time_ns() // 1000
             if response.status != 200:
-                pause = retry_after(response.headers.get('Retry-After')) if response.status in (429, 418) else 5
+                pause = retry_after(response.headers.get('Retry-After')) if response.status in policy.throttle_statuses else 5
                 await self.schedule.call('finish', self.worker_id, job, False, pause)
                 self.event(dict(exchange=market, symbol=job['symbol'], channel=channel),
-                           'rest_rate_limited' if response.status in (429, 418) else 'rest_error',
+                           'rest_rate_limited' if response.status in policy.throttle_statuses else 'rest_error',
                            status=response.status, cooldown=pause)
                 return
             data = json.loads(raw)
-            if channel == 'exchangeInfo': await self.schedule.call('metadata', market, data)
+            if channel == policy.metadata_channel: await self.schedule.call('metadata', market, data)
             else:
                 record = dict(kind='rest', exchange=market, symbol=job['symbol'], channel=channel, raw=raw,
-                              time_unit='ms', generated=True, session='rest', request_id=job['request_id'],
+                              time_unit=policy.time_unit, generated=True, session='rest', request_id=job['request_id'],
                               generation=started, worker_generation=self.generation, endpoint=endpoint,
                               request_started_us=started, local_timestamp=received)
                 atoms(record); sequence = self.spool.emit(record)

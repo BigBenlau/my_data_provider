@@ -1,5 +1,5 @@
 """副本協議工具：批次拆分與原生事件識別；不建立價位狀態。"""
-from common.protocol import decode, validate
+from common.protocol import decode
 from .transport import adapter
 from .raw import json_text
 from .redundancy import fingerprint
@@ -9,28 +9,27 @@ def atoms(record):
     # 只讓真實行情進入正式輸出；控制訊息由 worker 日誌處理。
     obj = decode(record)
     market, channel = record['exchange'], record['channel']
+    cls = adapter(market)
     if record['kind'] == 'rest':
-        validate(obj, channel, record['symbol'])
+        cls.validate_event(obj, channel, record['symbol'])
         ident = record['request_id']
         return [dict(record=record, ident=ident, digest=fingerprint(obj), strong=True,
-                     marker=None, snapshot=channel == 'depthSnapshot')]
-    cls = adapter(market)
+                     marker=None, snapshot=cls.rest_policy is not None and channel == cls.rest_policy.snapshot)]
     kind, data = cls.classify(record, obj)
     if kind != 'data':
         raise ValueError('not a matching data message')
-    if market.startswith('binance'):
-        validate(data, channel, record['symbol'])
-    values = data.get('data') if isinstance(data, dict) else None
-    split = isinstance(values, list) and market in ('bybit', 'bybit-spot', 'okex', 'okex-swap')
+    cls.validate_event(data, channel, record['symbol'])
+    values = data.get(cls.batch_field) if cls.batch_field else None
+    split = isinstance(values, list)
     result = []
-    single = values if market in ('bybit', 'bybit-spot') and isinstance(values, dict) else data
+    single = values if cls.unwrap_single and isinstance(values, dict) else data
     for index, value in enumerate(values if split else [single]):
         if not isinstance(value, dict):
             raise ValueError('native event must be object')
         ident, strong, marker, snapshot = cls.replica_identity(channel, value, obj)
         item = dict(record)
         if split:
-            item.update(raw=json_text(dict(obj, data=[value])), encoding='utf8',
+            item.update(raw=json_text({**obj, cls.batch_field: [value]}), encoding='utf8',
                         batch_split_version=1, batch_index=index, batch_size=len(values))
         result.append(dict(record=item, ident=fingerprint(ident), digest=fingerprint(value),
                            strong=strong, marker=marker, snapshot=snapshot, variant=variant_signature(record, value)))
@@ -40,11 +39,10 @@ def atoms(record):
 def variant_signature(record, value):
     # 差異分類只作診斷；不改原文、去重鍵或嚴格交接條件。
     market, channel = record['exchange'], record['channel']
-    if market == 'binance' and channel == 'depth@100ms':
-        fields, category = {'E'}, 'publication_timestamp_variant'
-    elif market == 'coinbase' and channel == 'ticker':
-        fields, category = {'volume_24h', 'volume_30d'}, 'rolling_statistics_variant'
-    else: return None
+    rule = adapter(market).variant_fields.get((market, channel))
+    if rule is None:
+        return None
+    fields, category = rule
     return dict(category=category, digest=fingerprint({k: v for k, v in value.items() if k not in fields}))
 
 

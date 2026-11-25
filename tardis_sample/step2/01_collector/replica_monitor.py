@@ -55,7 +55,7 @@ class Monitor:
             if now - states.get(worker, {}).get('reported_at', 0) > self.options['worker_timeout']:
                 reasons[worker] = 'transport_stale'
         for feed in self.feeds:
-            name = key(feed); needed = 1 if 'liquidation' in feed['channel'].lower() or feed['channel'] == 'forceOrder' else self.options['match_events']
+            name = key(feed); needed = self.match_count(feed)
             if any(self.common(candidate, p, name, states, since) < needed for p in peers):
                 reasons[name] = 'common_native_events_unverified'
             if self.db.execute('SELECT 1 FROM conflicts WHERE feed=? AND created>=? LIMIT 1', (name, since)).fetchone():
@@ -151,15 +151,18 @@ class Monitor:
             report['state'] = 'observed_only' if name in self.blockers else 'awaiting_match'
             if old.get('sessions') == report['sessions'] and old.get('matched_observed_us'):
                 report.update(state='matched', matched_observed_us=old['matched_observed_us'])
-            elif name not in self.blockers and self.sample_match(name, pair, feed['channel']):
+            elif name not in self.blockers and self.sample_match(name, pair, self.match_count(feed)):
                 report.update(state='matched', matched_observed_us=int(now * 1e6))
         if old != report:
             LOG.info('event=ws_coverage feed=%s details=%s', name, json.dumps(report))
         return report
 
-    def sample_match(self, name, pair, channel):
+    def match_count(self, feed):
+        # 事件稀少的來源由交易所明確聲明，交接仍需實際共同事件。
+        return 1 if feed['channel'] in adapter(feed['exchange']).optional_channels else self.options['match_events']
+
+    def sample_match(self, name, pair, needed):
         # 逐一核對有限樣本的主鍵，避免初始收訊或冷門來源掃描整段歷史。
-        needed = 1 if 'liquidation' in channel.lower() or channel == 'forceOrder' else self.options['match_events']
         matched = self.proofs.setdefault(name, set())
         for seq in self.store.samples.get(name, ()):
             if seq in matched:
@@ -211,8 +214,9 @@ class Monitor:
     def stopped(self):
         # 停止收訊不再標為即時靜默；必要來源缺失仍留在最終品質報告。
         observed = self.store.observed_feeds()
-        absent = sorted(set(source_inventory(self.config)) - observed)
-        optional = [f for f in absent if f.split('/')[-1] in ('forceOrder', 'allLiquidation')]
+        inventory = source_inventory(self.config)
+        absent = sorted(set(inventory) - observed)
+        optional = [k for k in absent if inventory[k]['channel'] in adapter(inventory[k]['exchange']).optional_channels]
         required = sorted(set(absent) - set(optional))
         self.latest.update(status='stopped', workers={}, silent_or_unverified=[], observed_sources=sorted(observed),
                            missing_required_sources=required, silent_optional_sources=optional)

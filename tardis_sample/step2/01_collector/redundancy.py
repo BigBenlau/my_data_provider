@@ -4,13 +4,9 @@ import json
 from pathlib import Path
 from collections import defaultdict
 from common import STEP2_ROOT
-from common.protocol import ADAPTERS
+from common.protocol import FAMILIES
 from .transport import COLLECTOR_ROOT, adapter, configuration, key
 
-FAMILIES = {
-    'binance': ['binance', 'binance-futures'], 'bybit': ['bybit', 'bybit-spot'],
-    'okx': ['okex', 'okex-swap'], 'coinbase': ['coinbase'], 'upbit': ['upbit'],
-}
 DEFAULTS = {
     'rotation_seconds': 600, 'verify_seconds': 10, 'match_events': 3,
     'match_wait_seconds': 5, 'candidate_timeout': 120, 'heartbeat_seconds': 5,
@@ -57,7 +53,7 @@ def group_config(family, path=None):
     selected = source.get('exchanges', {}).get(family, {})
     markets = selected.get('markets', {})
     if not markets:
-        markets = {m: {'symbols': source['symbols'] if family == 'binance' else adapter(m).default_symbols(m)}
+        markets = {m: {'symbols': adapter(m).legacy_symbols(source, m)}
                    for m in FAMILIES[family]}
     if not markets or not set(markets) <= set(FAMILIES[family]):
         raise ValueError('markets must belong to one exchange family')

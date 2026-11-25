@@ -1,9 +1,19 @@
 """Coinbase Exchange 公開頻道協議；保留 matches／last_match 與 level2_batch 語義。"""
-from common.protocol import classify_coinbase
+from common.coinbase import classify
 from ..transport import BaseCollector
 
 class Collector(BaseCollector):
     """交易所專屬的來源與協議實作；傳輸、落盤與日誌沿用 BaseCollector。"""
+    time_unit = 'iso8601'
+    probe_channels = ('ticker',)
+    variant_fields = {('coinbase', 'ticker'): ({'volume_24h', 'volume_30d'}, 'rolling_statistics_variant')}
+
+    @staticmethod
+    def control_fields(feed, obj):
+        # 心跳內的交易序號作為觀察資訊，僅更新相符商品。
+        if obj.get('type') == 'heartbeat' and feed['symbol'] == obj.get('product_id'):
+            return dict(heartbeat_trade_id=obj.get('last_trade_id'), heartbeat_sequence=obj.get('sequence'))
+
     # 僅列出具可靠原生事件身分的來源；身分不等於連續性保證。
     replica_strong_channels = ('matches', 'ticker')
     continuity_channels = {}
@@ -17,15 +27,11 @@ class Collector(BaseCollector):
     def channels(market): 
         # 列出該市場的原生來源；現貨與衍生品清單明確分開。
         return ['matches', 'level2_batch', 'ticker']
-    @classmethod
-    def feeds(cls, config, market):
-        # 展開每個商品／channel 的端點與時間單位，每個來源各自建立連線。
-        return [dict(exchange=market, symbol=s, channel=c, time_unit='iso8601', urls=['wss://ws-feed.exchange.coinbase.com'])
-                for s in config['symbols'] for c in cls.channels(market)]
-    def subscription(self, feed):
-        # 建立此交易所要求的訂閱訊息，不假設其他交易所具有相同格式。
-        return {'type': 'subscribe', 'product_ids': [feed['symbol']], 'channels': [feed['channel'], 'heartbeat']}
-    classify = staticmethod(classify_coinbase)
+    @staticmethod
+    def endpoints(market):
+        # 依市場回傳可用的原生 WebSocket 路由。
+        return ['wss://ws-feed.exchange.coinbase.com']
+    classify = staticmethod(classify)
 
     @staticmethod
     def replica_subscription(feeds):

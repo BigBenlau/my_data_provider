@@ -59,11 +59,7 @@ def source_tasks(collector, config, stop, duration):
     for index, feed in enumerate(feeds(config)):
         collector.stat(feed)
         tasks.append(asyncio.create_task(collector.stream(feed, index * collector.connection_spacing)))
-    if 'binance-futures' in config['markets']:
-        for symbol in config['symbols']:
-            feed = dict(exchange='binance-futures', symbol=symbol, channel='openInterest', time_unit='ms')
-            collector.stat(feed)
-            tasks.append(asyncio.create_task(collector.oi(feed)))
+    tasks.extend(collector.polling_tasks(config))
     tasks.extend([asyncio.create_task(collector.heartbeat()), asyncio.create_task(stop.wait())])
     if duration:
         tasks.append(asyncio.create_task(asyncio.sleep(duration)))

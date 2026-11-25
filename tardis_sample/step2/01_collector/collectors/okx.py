@@ -1,9 +1,11 @@
 """OKX swap／spot 公開頻道協議；trades-all 與清算 adapter 仍待另外實作。"""
-from common.protocol import classify_okx
+from common.okx import classify
 from ..transport import BaseCollector
 
 class Collector(BaseCollector):
     """交易所專屬的來源與協議實作；傳輸、落盤與日誌沿用 BaseCollector。"""
+    batch_field = 'data'
+
     application_heartbeat = 'ping'
     # 僅列出具可靠原生事件身分的來源；身分不等於連續性保證。
     replica_strong_channels = ('trades', 'books', 'bbo-tbt')
@@ -18,15 +20,11 @@ class Collector(BaseCollector):
     def channels(market):
         # 列出該市場的原生來源；現貨與衍生品清單明確分開。
         return ['trades', 'books', 'bbo-tbt', 'tickers'] + (['mark-price', 'funding-rate', 'open-interest'] if market == 'okex-swap' else [])
-    @classmethod
-    def feeds(cls, config, market):
-        # 展開每個商品／channel 的端點與時間單位，每個來源各自建立連線。
-        return [dict(exchange=market, symbol=s, channel=c, time_unit='ms', urls=['wss://ws.okx.com/ws/v5/public', 'wss://ws.okx.com:8443/ws/v5/public'])
-                for s in config['symbols'] for c in cls.channels(market)]
-    def subscription(self, feed):
-        # 建立此交易所要求的訂閱訊息，不假設其他交易所具有相同格式。
-        return {'op': 'subscribe', 'args': [{'channel': feed['channel'], 'instId': feed['symbol']}]}
-    classify = staticmethod(classify_okx)
+    @staticmethod
+    def endpoints(market):
+        # 依市場回傳可用的原生 WebSocket 路由。
+        return ['wss://ws.okx.com/ws/v5/public', 'wss://ws.okx.com:8443/ws/v5/public']
+    classify = staticmethod(classify)
 
     @staticmethod
     def replica_subscription(feeds):

@@ -21,7 +21,7 @@ class Runtime:
         self.requested_image = image; self.host_root = host_root or str(self.root)
         self.path = self.root / '_state' / 'runtime.json'; self.http = None
         self.entries = json.loads(self.path.read_text()) if self.path.exists() else {}
-        self.prefix = 'collector-' + config['config_hash'][:8] + '-' + fingerprint(self.host_root)[:6] + '-'
+        self.prefix = f"collector-{config['family']}-{fingerprint(self.host_root)[:6]}-"
 
     async def open(self):
         # 只解析本機既有映像，不拉取 tag；之後一律使用不可變 image ID。
@@ -64,19 +64,34 @@ class Runtime:
     async def start_container(self, worker):
         # 掛載同一磁碟及設定；重啟既有容器前重新核對 immutable image。
         name = self.prefix + worker
+        # 舊版批次保留已登記的名稱，讓既有容器能正常接管及排空。
+        recorded = self.entries.get(worker, {}).get('name')
+        if recorded and recorded != name:
+            previous = await self.api('GET', '/containers/' + recorded + '/json', allowed=(200, 404))
+            if previous and 'Id' in previous:
+                return await self.resume_container(worker, recorded, previous)
         old = await self.api('GET', '/containers/' + name + '/json', allowed=(200, 404))
         if old and 'Id' in old:
-            if old['Image'] != self.image: raise ValueError('existing worker image mismatch')
-            if not old['State']['Running']: await self.api('POST', '/containers/' + name + '/start', allowed=(204, 304))
-        else:
-            body = dict(Image=self.image, Cmd=self.command(worker, '/data'),
-                        Labels={'collector.group': self.config['config_hash'], 'collector.worker': worker},
-                        HostConfig={'Binds': [self.host_root + ':/data'], 'RestartPolicy': {'Name': 'unless-stopped'},
-                                    'LogConfig': {'Type': 'json-file', 'Config': {'max-size': '10m', 'max-file': '3'}}})
-            # 正常 drain 回傳零，不應自動復活；程序崩潰由 Docker 及主管接續恢復。
-            body['HostConfig']['RestartPolicy'] = {'Name': 'on-failure', 'MaximumRetryCount': 3}
-            await self.api('POST', '/containers/create?name=' + name, body)
-            await self.api('POST', '/containers/' + name + '/start')
+            return await self.resume_container(worker, name, old)
+        body = dict(Image=self.image, Cmd=self.command(worker, '/data'),
+                    Labels={'collector.group': self.config['config_hash'], 'collector.worker': worker,
+                            'collector.exchange': self.config['family']},
+                    HostConfig={'Binds': [self.host_root + ':/data'],
+                                'RestartPolicy': {'Name': 'on-failure', 'MaximumRetryCount': 3},
+                                'LogConfig': {'Type': 'json-file', 'Config': {'max-size': '10m', 'max-file': '3'}}})
+        await self.api('POST', '/containers/create?name=' + name, body)
+        await self.api('POST', '/containers/' + name + '/start')
+        self.entries[worker] = dict(name=name, image=self.image)
+
+    async def resume_container(self, worker, name, info):
+        # 核對映像和既有標籤，避免接管其他批次的 worker。
+        if info['Image'] != self.image:
+            raise ValueError('existing worker image mismatch')
+        labels = info['Config']['Labels']
+        if labels.get('collector.group') != self.config['config_hash'] or labels.get('collector.worker') != worker:
+            raise ValueError('existing worker identity mismatch')
+        if not info['State']['Running']:
+            await self.api('POST', '/containers/' + name + '/start', allowed=(204, 304))
         self.entries[worker] = dict(name=name, image=self.image)
 
     async def alive(self, worker):

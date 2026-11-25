@@ -18,23 +18,9 @@ import time
 import fcntl
 
 SCHEMA_VERSION = 1
-CHANNELS = {
-    'binance': ('trade', 'bookTicker', 'depth@100ms', 'depthSnapshot'),
-    'binance-futures': ('trade', 'bookTicker', 'depth@0ms', 'depthSnapshot',
-                        'ticker', 'markPrice@1s', 'openInterest', 'forceOrder'),
-}
-# 原生欄位名稱區分大小寫；深度價位與委託物件保持 JSON。
-FIELDS = {
-    'trade': ('e', 'E', 's', 't', 'p', 'q', 'b', 'a', 'T', 'm', 'M', 'X'),
-    'bookTicker': ('e', 'u', 'E', 'T', 's', 'b', 'B', 'a', 'A'),
-    'depth@100ms': ('e', 'E', 'T', 's', 'U', 'u', 'pu', 'b', 'a'),
-    'depth@0ms': ('e', 'E', 'T', 's', 'U', 'u', 'pu', 'b', 'a'),
-    'depthSnapshot': ('lastUpdateId', 'E', 'T', 'bids', 'asks'),
-    'ticker': ('e', 'E', 's', 'p', 'P', 'w', 'c', 'Q', 'o', 'h', 'l', 'v', 'q', 'O', 'C', 'F', 'L', 'n'),
-    'markPrice@1s': ('e', 'E', 's', 'p', 'i', 'P', 'r', 'T'),
-    'openInterest': ('openInterest', 'symbol', 'time'),
-    'forceOrder': ('e', 'E', 'o'),
-}
+# 保留既有程式可讀的原生表頭清單，實際欄位由交易所定義。
+CHANNELS = {m: tuple(adapter(m).channels(m)) for m in ADAPTERS if adapter(m).native_fields}
+FIELDS = {k: v for m in CHANNELS for k, v in adapter(m).native_fields.items()}
 META = ('seq', 'run_id', 'kind', 'type', 'exchange', 'symbol', 'channel', 'session',
         'local_timestamp', 'time_unit', 'endpoint', 'generated', 'generation', 'encoding',
         'status', 'request_started_us', 'headers', 'extra', 'error')
@@ -67,10 +53,9 @@ def channel_names(exchange):
     return adapter(exchange).channels(exchange)
 
 def native_fields(exchange, channel):
-    # Binance 沿用固定原生欄位；其他交易所保留完整原生物件，
-    # 等各市場的獨立轉換器完成後，再解讀物件中的欄位。
-    # Binance 使用固定原生欄位；其他市場先保留完整 payload JSON，避免誤用欄位。
-    return FIELDS[channel] if exchange in CHANNELS else ('payload',)
+    # 具有固定表頭的市場逐欄匯出，其餘保留完整原生物件。
+    fields = adapter(exchange).native_fields
+    return fields[channel] if fields else ('payload',)
 
 def header(exchange, channel):
     # 組合採集 metadata、原生欄位及完整訊息原文，固定每個 channel 的欄位順序。
@@ -87,7 +72,8 @@ def channel_row(record, run_id):
     raw = record['raw']
     kind = record['kind']
     if kind in ('message', 'data', 'probe'):
-        kind = 'rest' if record['channel'] in ('depthSnapshot', 'openInterest') else 'ws'
+        policy = adapter(record['exchange']).rest_policy
+        kind = 'rest' if policy and channel in policy.channels else 'ws'
     data = {}
     message_type = 'rest_error' if record['kind'] == 'rest_error' else 'unparseable'
     error = ''

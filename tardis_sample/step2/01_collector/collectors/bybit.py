@@ -1,9 +1,19 @@
 """Bybit linear／spot 原始採集協議；保留原生快照／增量物件，不套用 Binance 規則。"""
-from common.protocol import classify_bybit
+from common.bybit import classify
 from ..transport import BaseCollector
 
 class Collector(BaseCollector):
     """交易所專屬的來源與協議實作；傳輸、落盤與日誌沿用 BaseCollector。"""
+    batch_field = 'data'
+    unwrap_single = True
+    optional_channels = ('allLiquidation',)
+
+    @staticmethod
+    def control_fields(feed, obj):
+        # 應用層 pong 確認同組訂閱的傳輸健康。
+        if obj.get('op') == 'pong' or obj.get('ret_msg') == 'pong':
+            return {}
+
     replica_group_limit = 10
     # 僅列出具可靠原生事件身分的來源；身分不等於連續性保證。
     replica_strong_channels = ('publicTrade', 'orderbook.1', 'orderbook.50')
@@ -19,17 +29,12 @@ class Collector(BaseCollector):
     def channels(market):
         # 列出該市場的原生來源；現貨與衍生品清單明確分開。
         return ['publicTrade', 'orderbook.50', 'orderbook.1', 'tickers'] + (['allLiquidation'] if market == 'bybit' else [])
-    @classmethod
-    def feeds(cls, config, market):
-        # 展開每個商品／channel 的端點與時間單位，每個來源各自建立連線。
+    @staticmethod
+    def endpoints(market):
+        # 依市場回傳可用的原生 WebSocket 路由。
         category = 'spot' if market == 'bybit-spot' else 'linear'
-        return [dict(exchange=market, symbol=s, channel=c, time_unit='ms',
-                     urls=[f'wss://stream.bybit.com/v5/public/{category}'])
-                for s in config['symbols'] for c in cls.channels(market)]
-    def subscription(self, feed):
-        # 建立此交易所要求的訂閱訊息，不假設其他交易所具有相同格式。
-        return {'op': 'subscribe', 'args': [feed['channel'] + '.' + feed['symbol']]}
-    classify = staticmethod(classify_bybit)
+        return [f'wss://stream.bybit.com/v5/public/{category}']
+    classify = staticmethod(classify)
 
     @staticmethod
     def replica_subscription(feeds):

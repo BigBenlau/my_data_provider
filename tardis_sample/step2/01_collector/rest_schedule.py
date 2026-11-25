@@ -45,13 +45,13 @@ class Schedule:
         # 初次才建立任務；重新啟動或候選 worker 不新增同一商品的輪詢。
         with self.db:
             for market, settings in self.config['market_settings'].items():
-                if not market.startswith('binance'): continue
-                if not set(settings['channels']) & {'depthSnapshot', 'openInterest'}: continue
+                policy = adapter(market).rest_policy
+                if not policy or not set(settings['channels']).intersection(policy.channels): continue
                 cap = self.config['rest_weight_per_minute'].get(market, 1200)
                 self.db.execute('INSERT OR IGNORE INTO limits VALUES(?,?,0,NULL)', (market, cap))
-                self.add_job(market, '', 'exchangeInfo', 3600, 0)
+                self.add_job(market, '', policy.metadata_channel, policy.metadata_interval, 0)
                 for index, symbol in enumerate(settings['symbols']):
-                    for channel in ('depthSnapshot', 'openInterest'):
+                    for channel in policy.channels:
                         if channel in settings['channels']:
                             interval = self.interval(market, channel)
                             phase = index / max(1, len(settings['symbols'])) * interval
@@ -60,21 +60,15 @@ class Schedule:
     def interval(self, market, channel):
         # 例行使用七成；期貨的 OI／快照再分配六成與四成，並向上取整。
         cap = self.db.execute('SELECT capacity FROM limits WHERE market=?', (market,)).fetchone()[0]
-        settings = self.config['market_settings'][market]; count = len(settings['symbols'])
-        both = 'openInterest' in settings['channels'] and 'depthSnapshot' in settings['channels']
-        share = (.6 if channel == 'openInterest' else .4) if both else 1
-        cost = 1 if channel == 'openInterest' else (50 if market == 'binance' else 20)
-        minimum = self.config['oi_interval'] if channel == 'openInterest' else self.config['snapshot_interval']
-        unit = 5 if channel == 'openInterest' else 60
-        return max(minimum, math.ceil(count * cost * 60 / (cap * .7 * share) / unit) * unit)
+        return adapter(market).rest_policy.interval(self.config, market, channel, cap)
 
     def add_job(self, market, symbol, channel, interval, phase):
         # 啟動快照均勻展開；第一輪也標記 warming，不以 ACK 冒充來源完成。
         name = '/'.join((market, symbol, channel))
-        delay = phase / interval * 5 if channel == 'depthSnapshot' else phase
+        delay = phase / interval * 5 if channel == adapter(market).rest_policy.snapshot else phase
         self.db.execute('INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?,?,NULL,0,NULL,0)',
                         (name, market, symbol, channel, self.now() + delay, interval))
-        if channel == 'depthSnapshot':
+        if channel == adapter(market).rest_policy.snapshot:
             self.db.execute('UPDATE jobs SET priority=1 WHERE id=? AND request_id IS NULL', (name,))
 
     def capacity(self, market):
@@ -82,7 +76,7 @@ class Schedule:
         row = self.db.execute('SELECT capacity FROM limits WHERE market=?', (market,)).fetchone()
         return row[0] if row else 1200
 
-    def available(self, scope, weight, cap, period, regular=False):
+    def available(self, scope, weight, cap, period, regular=False, regular_share=1):
         # 同時檢查本地滑動視窗及交易所回報；倒退時鐘採保守等待。
         now = self.now()
         self.db.execute('DELETE FROM usage WHERE scope=? AND at<?', (scope, now - period))
@@ -93,7 +87,7 @@ class Schedule:
         if used + weight > cap: return False
         if regular:
             regular_used = self.db.execute('SELECT coalesce(sum(weight),0) FROM usage WHERE scope=? AND regular=1', (scope,)).fetchone()[0]
-            if regular_used + weight > cap * 7 / 9: return False
+            if regular_used + weight > cap * regular_share: return False
         self.db.execute('INSERT INTO usage VALUES(?,?,?,?)', (scope, now, weight, int(regular)))
         return True
 
@@ -138,18 +132,19 @@ class Schedule:
 
     def reserve(self, market, channel, priority):
         # 所有限制視窗須一次通過；回滾失敗嘗試，避免部分扣額造成假壅塞。
-        cost = (50 if market == 'binance' else 20) if channel == 'depthSnapshot' else 1
-        if channel == 'exchangeInfo' and market == 'binance': cost = 20
+        policy = adapter(market).rest_policy
+        cost = policy.cost(market, channel)
         self.db.execute('SAVEPOINT quota')
         if priority:
             used = self.db.execute('SELECT coalesce(sum(weight),0) FROM usage WHERE scope=? AND regular=0 AND at>=?',
                                    ('rest:' + market, self.now() - 60)).fetchone()[0]
-            if used + cost > self.capacity(market) * .2:
+            if used + cost > self.capacity(market) * (policy.snapshot_percent / 100):
                 self.db.execute('RELEASE quota'); return False
-        windows = [('rest:' + market, cost, self.capacity(market) * .9, 60)]
+        windows = [('rest:' + market, cost, self.capacity(market) * (policy.usable_percent / 100), 60)]
         for kind, period, capacity in self.db.execute('SELECT kind,period,capacity FROM rate_windows WHERE market=?', (market,)):
-            windows.append((f'{market}:{kind}:{period}', cost if kind == 'REQUEST_WEIGHT' else 1, capacity * .9, period))
-        passed = all(self.available(scope, weight, cap, period, not priority) for scope, weight, cap, period in windows)
+            windows.append((f'{market}:{kind}:{period}', cost if kind == policy.weight_kind else 1, capacity * (policy.usable_percent / 100), period))
+        regular_share = policy.regular_percent / policy.usable_percent
+        passed = all(self.available(scope, weight, cap, period, not priority, regular_share) for scope, weight, cap, period in windows)
         if not passed: self.db.execute('ROLLBACK TO quota')
         self.db.execute('RELEASE quota'); return passed
 
@@ -163,7 +158,7 @@ class Schedule:
                 self.db.execute('INSERT INTO cooldown VALUES(?,?,-1) ON CONFLICT(scope) DO UPDATE SET until=max(until,excluded.until),used=-1',
                                 ('rest:' + market, now + cooldown))
             elif headers:
-                value = {k.lower(): v for k, v in headers.items()}.get('x-mbx-used-weight-1m')
+                value = {k.lower(): v for k, v in headers.items()}.get(adapter(market).rest_policy.used_weight_header)
                 if value is not None:
                     self.db.execute('INSERT INTO cooldown VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET used=CASE WHEN until=excluded.until THEN max(used,excluded.used) ELSE excluded.used END,until=excluded.until',
                                     ('rest:' + market, (int(now) // 60 + 1) * 60, int(value)))
@@ -176,38 +171,34 @@ class Schedule:
 
     def metadata(self, market, data):
         # 封存交易所限額及商品清單；未上市商品明確拒絕，不用空資料冒充成功。
-        valid = {x['symbol'] for x in data['symbols']}
-        missing = set(self.config['market_settings'][market]['symbols']) - valid
-        if missing: raise ValueError(f'unknown {market} symbols: {sorted(missing)}')
-        limits = [int(r['limit']) / int(r['intervalNum']) for r in data['rateLimits']
-                  if r['rateLimitType'] == 'REQUEST_WEIGHT' and r['interval'] == 'MINUTE']
-        if not limits: raise ValueError('exchangeInfo missing minute weight limit')
-        cap = min(int(min(limits)), self.config['rest_weight_per_minute'].get(market, 1200))
+        policy = adapter(market).rest_policy
+        cap, windows = policy.rate_limits(data, self.config['market_settings'][market]['symbols'],
+                                         self.config['rest_weight_per_minute'].get(market, 1200))
         with self.db:
             self.db.execute('UPDATE limits SET capacity=?,verified=1,raw=? WHERE market=?', (cap, stable_json(data), market))
-            units = {'SECOND': 1, 'MINUTE': 60, 'HOUR': 3600, 'DAY': 86400}
-            for rule in data['rateLimits']:
-                if rule['rateLimitType'] in ('REQUEST_WEIGHT', 'RAW_REQUESTS') and rule['interval'] in units:
-                    self.db.execute('INSERT OR REPLACE INTO rate_windows VALUES(?,?,?,?)',
-                                    (market, rule['rateLimitType'], units[rule['interval']] * int(rule['intervalNum']), int(rule['limit'])))
-            for channel in ('openInterest', 'depthSnapshot'):
+            self.db.executemany('INSERT OR REPLACE INTO rate_windows VALUES(?,?,?,?)',
+                                [(market, *window) for window in windows])
+            for channel in policy.channels:
                 self.db.execute('UPDATE jobs SET interval=? WHERE market=? AND channel=?', (self.interval(market, channel), market, channel))
 
     def request_snapshot(self, market, symbol):
         # 只有合併來源仍有缺口才提高快照優先級，worker 重連不觸發全量快照。
+        policy = adapter(market).rest_policy
+        if not policy: return
         with self.db:
             self.db.execute('UPDATE jobs SET due=min(due,?),priority=1 WHERE market=? AND symbol=? AND channel=?',
-                            (self.now(), market, symbol, 'depthSnapshot'))
+                            (self.now(), market, symbol, policy.snapshot))
 
     def capacity_summary(self):
         # 主管讀取實際生效週期，讓容量不足的降頻在唯一運行日誌中可見。
         query = '''SELECT market,channel,max(interval),count(*) FROM jobs
-            WHERE channel IN ('openInterest','depthSnapshot') GROUP BY market,channel'''
+            WHERE symbol<>'' GROUP BY market,channel'''
         result = []
         for market, channel, period, count in self.db.execute(query):
             remaining = self.db.execute('SELECT count(*) FROM jobs j LEFT JOIN progress p ON j.id=p.id WHERE market=? AND channel=? AND p.id IS NULL', (market, channel)).fetchone()[0]
-            cost = (50 if market == 'binance' else 20) if channel == 'depthSnapshot' else 1
-            per_minute = int(self.capacity(market) * .2 // cost) if channel == 'depthSnapshot' else None
+            policy = adapter(market).rest_policy
+            cost = policy.cost(market, channel)
+            per_minute = int(self.capacity(market) * (policy.snapshot_percent / 100) // cost) if channel == policy.snapshot else None
             result.append(dict(market=market, channel=channel, interval=period, symbols=count,
                                capacity=self.capacity(market), warming_symbols=remaining,
                                initial_per_minute=per_minute, warming_budget_windows=math.ceil(remaining / per_minute) if per_minute else None))

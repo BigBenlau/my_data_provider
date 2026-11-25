@@ -1,10 +1,12 @@
 """Upbit 韓國市場協議：KRW 商品代碼、binary JSON 與沒有訂閱 ACK 的接入方式。"""
 import uuid
-from common.protocol import classify_upbit
+from common.upbit import classify
 from ..transport import BaseCollector
 
 class Collector(BaseCollector):
     """交易所專屬的來源與協議實作；傳輸、落盤與日誌沿用 BaseCollector。"""
+    probe_channels = ('trade',)
+
     requires_ack = False
     # 僅列出具可靠原生事件身分的來源；身分不等於連續性保證。
     replica_strong_channels = ('trade',)
@@ -24,15 +26,11 @@ class Collector(BaseCollector):
     def channels(market): 
         # 列出該市場的原生來源；現貨與衍生品清單明確分開。
         return ['trade', 'orderbook']
-    @classmethod
-    def feeds(cls, config, market):
-        # 展開每個商品／channel 的端點與時間單位，每個來源各自建立連線。
-        return [dict(exchange=market, symbol=s, channel=c, time_unit='ms', urls=['wss://api.upbit.com/websocket/v1'])
-                for s in config['symbols'] for c in cls.channels(market)]
-    def subscription(self, feed):
-        # 建立此交易所要求的訂閱訊息，不假設其他交易所具有相同格式。
-        return [{'ticket': str(uuid.uuid4())}, {'type': feed['channel'], 'codes': [feed['symbol']]}, {'format': 'DEFAULT'}]
-    classify = staticmethod(classify_upbit)
+    @staticmethod
+    def endpoints(market):
+        # 依市場回傳可用的原生 WebSocket 路由。
+        return ['wss://api.upbit.com/websocket/v1']
+    classify = staticmethod(classify)
 
     @staticmethod
     def replica_subscription(feeds):
