@@ -1,0 +1,242 @@
+{
+  "id": "bybit-spot",
+  "name": "Bybit Spot",
+  "enabled": true,
+  "availableSince": "2021-12-04T00:00:00.000Z",
+  "availableChannels": [
+    "publicTrade",
+    "orderbook.50",
+    "orderbook.200",
+    "orderbook.1",
+    "tickers",
+    "lt",
+    "trade",
+    "depth",
+    "bookTicker"
+  ],
+  "availableSymbols": [
+    {
+      "id": "BTCUSDT",
+      "type": "spot",
+      "availableSince": "2021-12-04T00:00:00.000Z"
+    },
+    {
+      "id": "ETHUSDT",
+      "type": "spot",
+      "availableSince": "2021-12-04T00:00:00.000Z"
+    },
+    {
+      "id": "GRTUSDT",
+      "type": "spot",
+      "availableSince": "2021-12-04T00:00:00.000Z"
+    },
+    {
+      "id": "SOLUSDT",
+      "type": "spot",
+      "availableSince": "2021-12-04T00:00:00.000Z"
+    }
+  ],
+  "channelDetails": [
+    {
+      "name": "publicTrade",
+      "description": "Real-time public trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/trade",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "trade"
+      ]
+    },
+    {
+      "name": "orderbook.50",
+      "description": "Order book snapshots and deltas at depth 50",
+      "frequency": "20ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "orderbook.200",
+      "description": "Order book snapshots and deltas at depth 200",
+      "frequency": "200ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook",
+      "apiVersion": "v5",
+      "availableSince": "2025-02-24T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "orderbook.1",
+      "description": "Order book snapshots and deltas at depth 1",
+      "frequency": "10ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_ticker"
+      ]
+    },
+    {
+      "name": "tickers",
+      "description": "Ticker snapshots and deltas with 24h stats",
+      "frequency": "50ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/ticker",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z"
+    },
+    {
+      "name": "lt",
+      "description": "Leveraged token NAV and basket updates",
+      "frequency": "unknown",
+      "frequencySource": "inferred",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z"
+    },
+    {
+      "name": "trade",
+      "description": "Public trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/spot/v1/_websockets.md#user-content-twebsocketv2trade",
+      "apiVersion": "v2",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "trade"
+      ],
+      "availableSince": "2021-12-04T00:00:00.000Z"
+    },
+    {
+      "name": "depth",
+      "description": "Order book snapshots and deltas",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/spot/v1/_websockets.md#user-content-twebsocketv2depth",
+      "apiVersion": "v2",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2021-12-04T00:00:00.000Z"
+    },
+    {
+      "name": "bookTicker",
+      "description": "Best bid and best ask updates",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/spot/v1/_websockets.md#user-content-twebsocketv2bookticker",
+      "apiVersion": "v2",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_ticker"
+      ],
+      "availableSince": "2021-12-04T00:00:00.000Z"
+    }
+  ],
+  "apiDocsUrl": "https://bybit-exchange.github.io/docs/v5/intro",
+  "dataCollectionDetails": {
+    "recorderDataCenter": {
+      "host": "GCP",
+      "regionId": "asia-northeast1",
+      "location": "Tokyo, Asia Pacific"
+    },
+    "wssConnection": {
+      "url": "wss://stream.bybit.com/v5/public/spot",
+      "apiVersion": "v5"
+    },
+    "wssConnectionChanges": [
+      {
+        "until": "2023-04-05T00:00:00.000Z",
+        "url": "wss://stream.bybit.com/spot/quote/ws/v2",
+        "apiVersion": "v2"
+      }
+    ],
+    "exchangeDataCenter": {
+      "host": "AWS",
+      "regionId": "ap-southeast-1",
+      "location": "Singapore, Asia Pacific"
+    }
+  },
+  "datasets": {
+    "formats": [
+      "csv"
+    ],
+    "exportedFrom": "2021-12-04T00:00:00.000Z",
+    "exportedUntil": "2026-09-23T00:00:00.000Z",
+    "symbols": [
+      {
+        "id": "BTCUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2021-12-04T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "ETHUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2021-12-04T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "GRTUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2021-12-04T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "SOLUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2021-12-04T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      }
+    ]
+  },
+  "incidentReports": [
+    {
+      "from": "2026-08-13T14:33:00.000Z",
+      "to": "2026-08-13T14:36:00.000Z",
+      "status": "resolved",
+      "details": "Partial data gaps were caused by a brief connectivity interruption affecting real-time data collection. Normal recording resumed after the affected connections recovered."
+    }
+  ]
+}

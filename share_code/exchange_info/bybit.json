@@ -1,0 +1,432 @@
+{
+  "id": "bybit",
+  "name": "Bybit Derivatives",
+  "enabled": true,
+  "availableSince": "2019-11-07T00:00:00.000Z",
+  "availableChannels": [
+    "publicTrade",
+    "orderbook.50",
+    "orderbook.rpi",
+    "orderbook.full",
+    "orderbook.500",
+    "orderbook.1000",
+    "orderbook.1",
+    "allLiquidation",
+    "tickers",
+    "trade",
+    "orderBookL2_25",
+    "orderBook_200",
+    "liquidation",
+    "instrument_info",
+    "insurance",
+    "long_short_ratio"
+  ],
+  "availableSymbols": [
+    {
+      "id": "BTCUSDT",
+      "type": "perpetual",
+      "availableSince": "2020-05-28T00:00:00.000Z"
+    },
+    {
+      "id": "ETHUSDT",
+      "type": "perpetual",
+      "availableSince": "2020-10-21T00:00:00.000Z"
+    },
+    {
+      "id": "GRTUSDT",
+      "type": "perpetual",
+      "availableSince": "2021-12-06T00:00:00.000Z"
+    },
+    {
+      "id": "SOLUSDT",
+      "type": "perpetual",
+      "availableSince": "2021-06-29T00:00:00.000Z"
+    }
+  ],
+  "channelDetails": [
+    {
+      "name": "publicTrade",
+      "description": "Real-time public trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/trade",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "trade"
+      ]
+    },
+    {
+      "name": "orderbook.50",
+      "description": "Order book snapshots and deltas at depth 50",
+      "frequency": "20ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "orderbook.rpi",
+      "description": "Order book snapshots and deltas at depth 50 including RPI quotes",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook-rpi",
+      "apiVersion": "v5",
+      "availableSince": "2026-08-19T00:00:00.000Z",
+      "additionalInfo": "Each bid and ask level contains price, non-RPI quantity, and RPI quantity."
+    },
+    {
+      "name": "orderbook.full",
+      "description": "Full-depth order book snapshots and incremental updates stream",
+      "frequency": "200ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/full-ob",
+      "apiVersion": "v5",
+      "availableSince": "2026-08-19T00:00:00.000Z",
+      "additionalInfo": "The WebSocket stream provides delta-only updates and excludes RPI orders. Initial snapshots with up to 10,000 levels per side are fetched from the Bybit full order book REST endpoint, stored with \"type\":\"snapshot\" and \"generated\":true, and validated for overlap with buffered updates using u and seq."
+    },
+    {
+      "name": "orderbook.500",
+      "description": "Order book snapshots and deltas at depth 500",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "availableTo": "2025-09-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "orderbook.1000",
+      "description": "Order book snapshots and deltas at depth 1000",
+      "frequency": "200ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook",
+      "apiVersion": "v5",
+      "availableSince": "2025-09-04T00:00:00.000Z",
+      "availableTo": "2026-08-19T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "orderbook.1",
+      "description": "Order book snapshots and deltas at depth 1",
+      "frequency": "10ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_ticker"
+      ]
+    },
+    {
+      "name": "allLiquidation",
+      "description": "All liquidation events stream with 500ms push frequency",
+      "frequency": "500ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/all-liquidation",
+      "apiVersion": "v5",
+      "availableSince": "2025-02-25T00:00:00.000Z",
+      "sourceFor": [
+        "liquidation"
+      ]
+    },
+    {
+      "name": "tickers",
+      "description": "Ticker snapshots and deltas with 24h stats and reference prices",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://bybit-exchange.github.io/docs/v5/websocket/public/ticker",
+      "apiVersion": "v5",
+      "availableSince": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ]
+    },
+    {
+      "name": "trade",
+      "description": "Public trade executions stream",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/futuresV2/inverse_perpetual/_websockets.md#user-content-twebsockettrade",
+      "apiVersion": "v2",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "trade"
+      ],
+      "availableSince": "2019-11-07T00:00:00.000Z"
+    },
+    {
+      "name": "orderBookL2_25",
+      "description": "Order book snapshots and deltas at depth 25",
+      "frequency": "20ms",
+      "frequencySource": "inferred",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/futuresV2/inverse_perpetual/_websockets.md#user-content-twebsocketorderbook25",
+      "apiVersion": "v2",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2019-11-07T00:00:00.000Z"
+    },
+    {
+      "name": "orderBook_200",
+      "description": "Order book snapshots and deltas at depth 200",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/futuresV2/inverse_perpetual/_websockets.md#user-content-twebsocketorderbook200",
+      "apiVersion": "v2",
+      "availableSince": "2019-12-23T00:00:00.000Z",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "liquidation",
+      "description": "Liquidation stream for each symbol, up to one message per second",
+      "frequency": "real-time",
+      "frequencySource": "inferred",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/futuresV2/inverse_perpetual/_websockets.md#user-content-twebsocketliquidation",
+      "apiVersion": "v2",
+      "availableSince": "2020-11-03T00:00:00.000Z",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "liquidation"
+      ]
+    },
+    {
+      "name": "instrument_info",
+      "description": "Instrument ticker and contract state updates",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/futuresV2/inverse_perpetual/_websockets.md#user-content-twebsocketinstrumentinfo",
+      "apiVersion": "v2",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ],
+      "availableSince": "2019-11-07T00:00:00.000Z"
+    },
+    {
+      "name": "insurance",
+      "description": "Insurance fund balance updates",
+      "frequency": "1d",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://github.com/thaaddeus/bybit-docs-legacy/blob/master/source/includes/futuresV2/inverse_perpetual/_websockets.md#user-content-twebsocketinsurance",
+      "apiVersion": "v2",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "availableSince": "2019-11-07T00:00:00.000Z"
+    },
+    {
+      "name": "long_short_ratio",
+      "description": "Generated global long/short account ratio snapshots from REST account-ratio endpoint using 5min period buckets, messages marked as \"topic\":\"long_short_ratio.<symbol>\" and \"generated\":true",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "apiVersion": "v2",
+      "availableSince": "2022-03-20T00:00:00.000Z",
+      "availableTo": "2023-04-05T00:00:00.000Z",
+      "generated": true
+    }
+  ],
+  "apiDocsUrl": "https://bybit-exchange.github.io/docs/v5/intro",
+  "dataCollectionDetails": {
+    "recorderDataCenter": {
+      "host": "GCP",
+      "regionId": "asia-northeast1",
+      "location": "Tokyo, Asia Pacific"
+    },
+    "recorderDataCenterChanges": [
+      {
+        "until": "2020-05-28T00:00:00.000Z",
+        "dataCenter": {
+          "host": "GCP",
+          "regionId": "europe-west2",
+          "location": "London, Europe"
+        }
+      }
+    ],
+    "wssConnection": {
+      "url": "wss://stream.bybit.com/v5/public",
+      "apiVersion": "v5"
+    },
+    "wssConnectionChanges": [
+      {
+        "until": "2023-04-05T00:00:00.000Z",
+        "url": "wss://stream.bybit.com/realtime",
+        "apiVersion": "v2"
+      }
+    ],
+    "exchangeDataCenter": {
+      "host": "AWS",
+      "regionId": "ap-southeast-1",
+      "location": "Singapore, Asia Pacific"
+    }
+  },
+  "datasets": {
+    "formats": [
+      "csv"
+    ],
+    "exportedFrom": "2019-11-07T00:00:00.000Z",
+    "exportedUntil": "2026-09-23T00:00:00.000Z",
+    "symbols": [
+      {
+        "id": "BTCUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2020-05-28T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "ETHUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2020-10-21T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "GRTUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2021-12-06T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "SOLUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2021-06-29T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      }
+    ]
+  },
+  "incidentReports": [
+    {
+      "from": "2026-08-13T14:33:00.000Z",
+      "to": "2026-08-13T14:36:00.000Z",
+      "status": "resolved",
+      "details": "Partial data gaps were caused by a brief connectivity interruption affecting real-time data collection. Normal recording resumed after the affected connections recovered."
+    },
+    {
+      "from": "2026-06-08T08:59:00.000Z",
+      "to": "2026-06-08T08:59:52.816Z",
+      "status": "resolved",
+      "details": "Short data gap caused by a Tokyo recorder stability issue. Recording resumed at 2026-06-08T08:59:52.816Z UTC."
+    },
+    {
+      "from": "2025-11-21T07:34:00.000Z",
+      "to": "2025-11-21T08:55:00.000Z",
+      "status": "resolved",
+      "details": "Data loss due to bybit WS API returning error message when trying to subscribing to their liquidation feed that subsequently resulted in IP rate limit ban."
+    },
+    {
+      "from": "2025-10-10T21:15:00.000Z",
+      "to": "2025-10-10T21:22:00.000Z",
+      "status": "resolved",
+      "details": "Data loss occurred due to a surge of incoming data that exceeded the processing capacity of our infrastructure at that time."
+    },
+    {
+      "from": "2025-09-22T06:00:00.000Z",
+      "to": "2025-09-22T06:17:00.000Z",
+      "status": "resolved",
+      "details": "Data loss occurred due to a surge of incoming data that exceeded the processing capacity of our infrastructure at that time."
+    },
+    {
+      "from": "2025-08-14T12:30:00.000Z",
+      "to": "2025-08-14T12:50:00.000Z",
+      "status": "resolved",
+      "details": "Data loss occurred due to a surge of incoming data that exceeded the processing capacity of our infrastructure at that time."
+    },
+    {
+      "from": "2023-04-19T08:23:00.000Z",
+      "to": "2023-04-19T09:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing orderbook.1, orderbook.50, and publicTrade data during a Bybit WebSocket reconnect storm. Recorder logs show repeated upstream WebSocket HTTP 403 responses; normal recording resumed at 09:00 UTC."
+    },
+    {
+      "from": "2023-04-05T00:00:00.000Z",
+      "to": "2023-04-05T05:50:00.000Z",
+      "status": "resolved",
+      "details": "Missing feed data due to deployment bug that was introduced when switching to Bybit API v5."
+    },
+    {
+      "from": "2023-04-01T00:00:00.000Z",
+      "to": "2023-04-11T00:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing v2/ticker channel data due to internal bug."
+    },
+    {
+      "from": "2021-05-12T07:02:00.000Z",
+      "to": "2021-05-12T07:42:00.000Z",
+      "status": "resolved",
+      "details": "GKE node network issue resulted triggering auto-repair logic and missing data in that period."
+    },
+    {
+      "from": "2021-03-05T14:14:00.000Z",
+      "to": "2021-03-05T14:23:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to virtual machine crash. Crash was caused by hardware issue on the physical machine hosting VM which has been automatically replaced with healthy one by auto-repair logic."
+    },
+    {
+      "from": "2020-06-28T16:13:00.000Z",
+      "to": "2020-06-28T16:20:00.000Z",
+      "status": "resolved",
+      "details": "Intermittent AWS CloudFront connection issues caused increased disconnections and establishing connection timeouts that resulted in missing data."
+    },
+    {
+      "from": "2020-06-11T18:32:00.000Z",
+      "to": "2020-06-11T19:55:00.000Z",
+      "status": "resolved",
+      "details": "Intermittent Kubernetes Node network issue caused increased disconnections count and establishing connection timeouts that resulted in missing data."
+    },
+    {
+      "from": "2020-05-28T16:14:56.000Z",
+      "to": "2020-05-28T16:15:04.000Z",
+      "status": "resolved",
+      "details": "Missing data (~8 seconds) caused by moving Bybit data collection infrastructure from London to Tokyo GKE cluster."
+    }
+  ]
+}

@@ -1,0 +1,308 @@
+{
+  "id": "coinbase",
+  "name": "Coinbase Exchange",
+  "enabled": true,
+  "availableSince": "2019-03-30T00:00:00.000Z",
+  "availableChannels": [
+    "match",
+    "l2update",
+    "snapshot",
+    "ticker",
+    "subscriptions",
+    "received",
+    "open",
+    "done",
+    "change",
+    "last_match",
+    "full_snapshot",
+    "rfq_matches"
+  ],
+  "availableSymbols": [
+    {
+      "id": "BTC-USD",
+      "type": "spot",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "id": "ETH-USD",
+      "type": "spot",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "id": "GRT-USD",
+      "type": "spot",
+      "availableSince": "2020-12-17T00:00:00.000Z"
+    },
+    {
+      "id": "SOL-USD",
+      "type": "spot",
+      "availableSince": "2021-06-17T00:00:00.000Z"
+    }
+  ],
+  "channelDetails": [
+    {
+      "name": "match",
+      "description": "Trade match events from the matches channel",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#matches-channel",
+      "sourceFor": [
+        "trade"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "l2update",
+      "description": "Level 2 order book updates",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#level2-channel",
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "snapshot",
+      "description": "Level 2 order book snapshots",
+      "frequency": "on-subscribe",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#level2-channel",
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "ticker",
+      "description": "Ticker updates with last trade and best bid and ask",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#ticker-channel",
+      "sourceFor": [
+        "book_ticker"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "subscriptions",
+      "description": "Subscription acknowledgements stream",
+      "frequency": "on-subscribe",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "received",
+      "description": "Order received events from the full channel",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#full-channel",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "open",
+      "description": "Order open events from the full channel",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#full-channel",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "done",
+      "description": "Order done and cancel events from the full channel",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#full-channel",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "change",
+      "description": "Order change events from the full channel",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#full-channel",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "last_match",
+      "description": "Most recent trade included with ticker updates",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#ticker-channel",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "full_snapshot",
+      "description": "Generated full order book L3 snapshots stream",
+      "additionalInfo": "Coinbase full channel does not provide initial snapshots, so snapshots are fetched from REST API and emitted as \"type\":\"full_snapshot\" with \"generated\":true. This enables historical full (L3) order book reconstruction and sequence-overlap validation against websocket full updates (enabled since 2020-06-11).",
+      "frequency": "on-subscribe",
+      "frequencySource": "internal",
+      "generated": true,
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "rfq_matches",
+      "description": "RFQ match events stream",
+      "frequency": "real-time",
+      "frequencySource": "inferred",
+      "exchangeDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/channels#rfq-matches-channel",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    }
+  ],
+  "apiDocsUrl": "https://docs.cdp.coinbase.com/exchange/websocket-feed/overview",
+  "dataCollectionDetails": {
+    "recorderDataCenter": {
+      "host": "GCP",
+      "regionId": "europe-west2",
+      "location": "London, Europe"
+    },
+    "wssConnection": {
+      "url": "wss://ws-direct.exchange.coinbase.com"
+    },
+    "exchangeDataCenter": {
+      "host": "AWS",
+      "regionId": "us-east-1",
+      "location": "N. Virginia, North America"
+    }
+  },
+  "datasets": {
+    "formats": [
+      "csv"
+    ],
+    "exportedFrom": "2019-03-30T00:00:00.000Z",
+    "exportedUntil": "2026-09-23T00:00:00.000Z",
+    "symbols": [
+      {
+        "id": "BTC-USD",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2019-03-30T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "ETH-USD",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2019-03-30T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "GRT-USD",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2020-12-17T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "SOL-USD",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2021-06-17T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      }
+    ]
+  },
+  "incidentReports": [
+    {
+      "from": "2026-06-23T19:32:00.000Z",
+      "to": "2026-06-23T19:37:00.000Z",
+      "status": "resolved",
+      "details": "Missing data in exchange-specific minute slices caused by a transient London recorder infrastructure/network connectivity disruption affecting selected upstream WebSocket/API connections. Some affected slices are empty or contain only reconnect markers. Normal recording resumed around 2026-06-23T19:37:00 UTC."
+    },
+    {
+      "from": "2023-11-08T00:00:00.000Z",
+      "to": "2023-11-10T00:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing feed data due to unexpected  behaviour of Coinbase WS API (subscription request were successfull, but no data except snapshot was returned)."
+    },
+    {
+      "from": "2023-02-03T00:00:00.000Z",
+      "to": "2023-02-03T12:00:00.000Z",
+      "status": "resolved",
+      "details": "Potentially missing L3 snapshots data due to Cloudflare issue (suspending Tardis account), see https://status.tardis.dev/incidents/zyfn9p37nvgn."
+    },
+    {
+      "from": "2022-06-21T06:28:00.000Z",
+      "to": "2022-06-21T07:10:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to Cloudflare Service being down (500 errors, connection timeouts), details: https://www.cloudflarestatus.com/incidents/xvs51y9qs9dj"
+    },
+    {
+      "from": "2021-11-10T05:09:00.000Z",
+      "to": "2021-11-10T05:19:00.000Z",
+      "status": "resolved",
+      "details": "~10 minutes data gap caused by GKE internal network issue that resulted in connection establishment timeouts preventing establishing WS connections that are used for data collection."
+    },
+    {
+      "from": "2021-10-21T10:14:00.000Z",
+      "to": "2021-10-21T10:26:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to deployment issue that required restoring old version and which caused downtime."
+    },
+    {
+      "from": "2021-08-24T07:52:00.000Z",
+      "to": "2021-08-24T08:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing data caused by hitting API rate limits that in turn caused WebSocket disconnections flood."
+    },
+    {
+      "from": "2021-05-06T18:00:00.000Z",
+      "to": "2021-05-13T08:00:00.000Z",
+      "status": "resolved",
+      "details": "Increased WebSocket API disconnections rate causing occasionally hitting API rate limits and data gaps in that period."
+    },
+    {
+      "from": "2020-07-26T14:44:39.000Z",
+      "to": "2020-07-26T14:51:14.000Z",
+      "status": "resolved",
+      "details": "Increased connections timeouts and disconnections count that caused missing data due to Cloudflare servers timing out."
+    },
+    {
+      "from": "2020-04-07T22:09:00.000Z",
+      "to": "2020-04-07T22:13:00.000Z",
+      "status": "resolved",
+      "details": "Increased connections timeouts and disconnections count that caused missing data due to Cloudflare servers timing out."
+    },
+    {
+      "from": "2020-04-01T19:32:00.000Z",
+      "to": "2020-04-01T19:37:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to Cloudflare global traffic disruption, details: https://www.cloudflarestatus.com/incidents/b21kvb7g394m"
+    },
+    {
+      "from": "2019-07-26T21:10:00.000Z",
+      "to": "2019-07-26T21:26:00.000Z",
+      "status": "resolved",
+      "details": "K8S node where recording containers are running became unresponsive (network issue, no access to or from node) and has been automatically replaced with healthy node by auto-repair logic. Unfortunately that caused missing data feed for approximately 15 minutes."
+    }
+  ]
+}

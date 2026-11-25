@@ -1,0 +1,160 @@
+{
+  "id": "upbit",
+  "name": "Upbit",
+  "enabled": true,
+  "availableSince": "2021-03-03T00:00:00.000Z",
+  "availableChannels": [
+    "trade",
+    "orderbook",
+    "ticker"
+  ],
+  "availableSymbols": [
+    {
+      "id": "KRW-BTC",
+      "type": "spot",
+      "availableSince": "2021-03-03T00:00:00.000Z"
+    },
+    {
+      "id": "KRW-ETH",
+      "type": "spot",
+      "availableSince": "2021-03-03T00:00:00.000Z"
+    },
+    {
+      "id": "KRW-GRT",
+      "type": "spot",
+      "availableSince": "2023-06-01T00:00:00.000Z"
+    },
+    {
+      "id": "KRW-SOL",
+      "type": "spot",
+      "availableSince": "2021-10-15T00:00:00.000Z"
+    }
+  ],
+  "channelDetails": [
+    {
+      "name": "trade",
+      "description": "Public trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.upbit.com/kr/reference/websocket-trade",
+      "apiVersion": "v1",
+      "sourceFor": [
+        "trade"
+      ],
+      "availableSince": "2021-03-03T00:00:00.000Z"
+    },
+    {
+      "name": "orderbook",
+      "description": "Order book snapshots and unit updates",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.upbit.com/kr/reference/websocket-orderbook",
+      "apiVersion": "v1",
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2021-03-03T00:00:00.000Z"
+    },
+    {
+      "name": "ticker",
+      "description": "24h ticker updates",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://docs.upbit.com/kr/reference/websocket-ticker",
+      "apiVersion": "v1",
+      "availableSince": "2021-03-03T00:00:00.000Z"
+    }
+  ],
+  "apiDocsUrl": "https://docs.upbit.com/kr/reference/websocket-guide",
+  "dataCollectionDetails": {
+    "recorderDataCenter": {
+      "host": "GCP",
+      "regionId": "asia-northeast1",
+      "location": "Tokyo, Asia Pacific"
+    },
+    "wssConnection": {
+      "url": "wss://api.upbit.com/websocket/v1",
+      "apiVersion": "v1"
+    },
+    "exchangeDataCenter": {
+      "host": "AWS",
+      "regionId": "ap-northeast-2",
+      "location": "Seoul, Asia Pacific"
+    }
+  },
+  "datasets": {
+    "formats": [
+      "csv"
+    ],
+    "exportedFrom": "2021-03-03T00:00:00.000Z",
+    "exportedUntil": "2026-09-23T00:00:00.000Z",
+    "symbols": [
+      {
+        "id": "KRW-BTC",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25"
+        ],
+        "availableSince": "2021-03-03T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "KRW-ETH",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25"
+        ],
+        "availableSince": "2021-03-03T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "KRW-GRT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25"
+        ],
+        "availableSince": "2023-06-01T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "KRW-SOL",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25"
+        ],
+        "availableSince": "2021-10-15T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      }
+    ]
+  },
+  "incidentReports": [
+    {
+      "from": "2026-08-13T14:33:00.000Z",
+      "to": "2026-08-13T14:36:00.000Z",
+      "status": "resolved",
+      "details": "Partial data gaps were caused by a brief connectivity interruption affecting real-time data collection. Normal recording resumed after the affected connections recovered."
+    },
+    {
+      "from": "2021-03-05T14:14:00.000Z",
+      "to": "2021-03-05T14:23:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to virtual machine crash. Crash was caused by hardware issue on the physical machine hosting VM which has been automatically replaced with healthy one by auto-repair logic."
+    }
+  ]
+}

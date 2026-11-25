@@ -1,0 +1,348 @@
+{
+  "id": "binance",
+  "name": "Binance Spot",
+  "enabled": true,
+  "availableSince": "2019-03-30T00:00:00.000Z",
+  "availableChannels": [
+    "trade",
+    "depth",
+    "depthSnapshot",
+    "bookTicker",
+    "aggTrade",
+    "ticker",
+    "borrowInterest",
+    "recentTrades",
+    "tokenNav"
+  ],
+  "availableSymbols": [
+    {
+      "id": "btcusdt",
+      "type": "spot",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "id": "ethusdt",
+      "type": "spot",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "id": "grtusdt",
+      "type": "spot",
+      "availableSince": "2020-12-19T00:00:00.000Z"
+    },
+    {
+      "id": "solusdt",
+      "type": "spot",
+      "availableSince": "2020-08-11T00:00:00.000Z"
+    }
+  ],
+  "channelDetails": [
+    {
+      "name": "trade",
+      "description": "Public spot trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#trade-streams",
+      "sourceFor": [
+        "trade"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "depth",
+      "description": "Incremental order book updates stream",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#diff-depth-stream",
+      "sourceFor": [
+        "book_change"
+      ],
+      "changes": [
+        {
+          "until": "2019-08-30T00:00:00.000Z",
+          "frequency": "1s"
+        }
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "depthSnapshot",
+      "description": "Generated full order book snapshots stream",
+      "additionalInfo": "Binance real-time WebSocket API does not provide initial order book snapshots. To overcome this issue we fetch initial order book snapshots from REST API and store them together with the rest of the WebSocket messages (top 1000 levels). Snapshot messages are marked with \"stream\":\"<symbol>@depthSnapshot\" and \"generated\":true.\n\nDuring data collection, integrity of incremental order book updates is validated using sequence numbers from the real-time feed (U and u fields). If a missed message is detected, the WebSocket connection is restarted. Initial book snapshots fetched from REST API are also validated for overlap with received depth messages.",
+      "frequency": "on-subscribe",
+      "frequencySource": "internal",
+      "generated": true,
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "bookTicker",
+      "description": "Best bid and best ask updates stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#individual-symbol-book-ticker-streams",
+      "availableSince": "2019-09-21T00:00:00.000Z",
+      "sourceFor": [
+        "book_ticker"
+      ]
+    },
+    {
+      "name": "aggTrade",
+      "description": "Aggregated spot trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#aggregate-trade-streams",
+      "availableSince": "2019-11-19T00:00:00.000Z"
+    },
+    {
+      "name": "ticker",
+      "description": "24h spot ticker updates stream",
+      "frequency": "1s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#individual-symbol-ticker-streams",
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "borrowInterest",
+      "description": "Generated margin borrow interest snapshots stream",
+      "additionalInfo": "Polled from Binance margin REST endpoint about every minute. Messages are marked as \"stream\":\"<asset>@borrowInterest\" and \"generated\":true.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "availableSince": "2021-02-23T00:00:00.000Z",
+      "generated": true
+    }
+  ],
+  "apiDocsUrl": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams",
+  "dataCollectionDetails": {
+    "recorderDataCenter": {
+      "host": "GCP",
+      "regionId": "asia-northeast1",
+      "location": "Tokyo, Asia Pacific"
+    },
+    "recorderDataCenterChanges": [
+      {
+        "until": "2020-05-18T00:00:00.000Z",
+        "dataCenter": {
+          "host": "GCP",
+          "regionId": "europe-west2",
+          "location": "London, Europe"
+        }
+      }
+    ],
+    "wssConnection": {
+      "url": "wss://stream.binance.com/stream?timeUnit=microsecond"
+    },
+    "wssConnectionChanges": [
+      {
+        "until": "2025-02-28T00:00:00.000Z",
+        "url": "wss://stream.binance.com/stream"
+      }
+    ],
+    "exchangeDataCenter": {
+      "host": "AWS",
+      "regionId": "ap-northeast-1",
+      "location": "Tokyo, Asia Pacific"
+    }
+  },
+  "datasets": {
+    "formats": [
+      "csv"
+    ],
+    "exportedFrom": "2019-03-30T00:00:00.000Z",
+    "exportedUntil": "2026-09-23T00:00:00.000Z",
+    "symbols": [
+      {
+        "id": "BTCUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2019-03-30T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "ETHUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2019-03-30T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "GRTUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2020-12-19T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "SOLUSDT",
+        "type": "spot",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "book_ticker"
+        ],
+        "availableSince": "2020-08-11T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      }
+    ]
+  },
+  "incidentReports": [
+    {
+      "from": "2026-08-13T14:33:00.000Z",
+      "to": "2026-08-13T14:36:00.000Z",
+      "status": "resolved",
+      "details": "Partial data gaps were caused by a brief connectivity interruption affecting real-time data collection. Normal recording resumed after the affected connections recovered."
+    },
+    {
+      "from": "2026-06-08T10:10:00.000Z",
+      "to": "2026-06-08T10:10:49.056Z",
+      "status": "resolved",
+      "details": "Short data gap caused by a Tokyo recorder stability issue. Recording resumed at 2026-06-08T10:10:49.056Z UTC."
+    },
+    {
+      "from": "2025-02-28T08:06:00.000Z",
+      "to": "2025-02-28T08:12:00.000Z",
+      "status": "resolved",
+      "details": "Data loss due to deployment misconfiguration issue, fix was applied and redeployed."
+    },
+    {
+      "from": "2024-06-14T11:42:00.000Z",
+      "to": "2024-06-14T12:41:00.000Z",
+      "status": "resolved",
+      "details": "Missing feed data due to API connection issues - 403 errors returned by Binance WS API."
+    },
+    {
+      "from": "2023-05-01T08:58:00.000Z",
+      "to": "2023-05-01T09:35:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to hitting Binance rate limits for WS connections (403 error)."
+    },
+    {
+      "from": "2023-02-03T00:00:00.000Z",
+      "to": "2023-02-03T12:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing initial orderbook snapshots due to Cloudflare issue (suspending Tardis account), see https://status.tardis.dev/incidents/zyfn9p37nvgn."
+    },
+    {
+      "from": "2022-04-08T05:00:00.000Z",
+      "to": "2022-04-08T12:00:00.000Z",
+      "status": "resolved",
+      "details": "Increased disconnections count and WS connections timeouts resulting in small data gaps."
+    },
+    {
+      "from": "2021-09-29T09:00:00.000Z",
+      "to": "2021-09-30T10:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing data for about 40% of currency pairs (did not affect BTCUSDT), due to race condition that manifested after Binance maintenance window and failed to recognise symbols being enabled in quick succession via API (status change from BREAK to TRADING), permanent fix has been deployed."
+    },
+    {
+      "from": "2021-06-02T00:00:00.000Z",
+      "to": "2021-06-05T00:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing depthSnapshot messages caused by hitting API rate limits by our proxy servers."
+    },
+    {
+      "from": "2021-05-12T13:59:00.000Z",
+      "to": "2021-05-12T14:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing data caused by new version deployment rolling out too slow."
+    },
+    {
+      "from": "2021-03-05T14:14:00.000Z",
+      "to": "2021-03-05T14:23:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to virtual machine crash. Crash was caused by hardware issue on the physical machine hosting VM which has been automatically replaced with healthy one by auto-repair logic."
+    },
+    {
+      "from": "2021-01-08T01:15:00.000Z",
+      "to": "2021-01-08T03:36:00.000Z",
+      "status": "resolved",
+      "details": "WS API was very frequently closing open connections with \"EndpointUnavailable\" status. It caused data gaps and delayed order book snapshots fetched from REST API due to rate limits."
+    },
+    {
+      "from": "2020-12-01T05:25:00.000Z",
+      "to": "2020-12-01T06:27:00.000Z",
+      "status": "resolved",
+      "details": "API rate limits hit due to deployment bug. It caused increased disconnections count and data gaps, hotfix has been deployed."
+    },
+    {
+      "from": "2020-10-17T00:00:00.000Z",
+      "to": "2020-10-17T07:48:03.000Z",
+      "status": "resolved",
+      "details": "Increased disconnections count triggering API rate limits thresholds that caused some data gaps. It has been investigated and fixed."
+    },
+    {
+      "from": "2020-06-11T18:32:00.000Z",
+      "to": "2020-06-11T19:55:00.000Z",
+      "status": "resolved",
+      "details": "Intermittent Kubernetes Node network issue caused increased disconnections count and establishing connection timeouts that resulted in missing data."
+    },
+    {
+      "from": "2020-05-19T15:47:00.000Z",
+      "to": "2020-05-19T16:01:00.000Z",
+      "status": "resolved",
+      "details": "Increased count of reconnections that could cause some data missing. It has been investigated and fixed - too small \"stale connection\" timeout."
+    },
+    {
+      "from": "2020-05-18T10:24:00.000Z",
+      "to": "2020-05-18T10:24:08.000Z",
+      "status": "resolved",
+      "details": "Missing data (~8 seconds) caused by moving Binance data collection infrastructure from London to Tokyo GKE cluster."
+    },
+    {
+      "from": "2020-02-13T10:02:00.000Z",
+      "to": "2020-02-14T00:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing initial order book snapshot data (depthSnapshot) and occasional initial order book snapshots not overlapping with depthUpdate messages due to exceeding Binance REST API rate limits. Fix has been applied, we're closely monitoring this issue."
+    },
+    {
+      "from": "2020-02-09T02:59:00.000Z",
+      "to": "2020-02-11T00:00:00.000Z",
+      "status": "resolved",
+      "details": "Missing initial order book snapshot data (depthSnapshot) and occasional initial order book snapshots not overlapping with depthUpdate messages due to exceeding Binance REST API rate limits."
+    },
+    {
+      "from": "2019-11-18T15:54:00.000Z",
+      "to": "2019-11-18T18:20:00.000Z",
+      "status": "resolved",
+      "details": "Increased count of reconnections that could cause some missing data and missing book snapshots. It was caused by logic that was incorrectly detecting that there was an issue with real-time subscription. It has been investigated and fixed."
+    },
+    {
+      "from": "2019-11-13T10:57:00.000Z",
+      "to": "2019-11-13T11:25:00.000Z",
+      "status": "resolved",
+      "details": "Increased count of reconnections due to deployment configuration issue that has been indentified and fixed. There could cause missing data during that time."
+    },
+    {
+      "from": "2019-07-26T21:10:00.000Z",
+      "to": "2019-07-26T21:26:00.000Z",
+      "status": "resolved",
+      "details": "K8S node where recording containers are running became unresponsive (network issue, no access to or from node) and has been automatically replaced with healthy node by auto-repair logic. Unfortunately that caused missing data feed for approximately 15 minutes."
+    }
+  ]
+}

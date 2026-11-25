@@ -1,0 +1,719 @@
+{
+  "id": "okex-swap",
+  "name": "OKX Swap",
+  "enabled": true,
+  "availableSince": "2019-03-30T00:00:00.000Z",
+  "availableChannels": [
+    "trades",
+    "trades-all",
+    "books-l2-tbt",
+    "books",
+    "bbo-tbt",
+    "tickers",
+    "liquidations",
+    "liquidation-orders",
+    "open-interest",
+    "mark-price",
+    "funding-rate",
+    "index-tickers",
+    "price-limit",
+    "status",
+    "instruments",
+    "long-short-account-ratio",
+    "taker-volume",
+    "public-block-trades",
+    "public-struc-block-trades",
+    "taker-volume-contract",
+    "long-short-account-ratio-contract-top-trader",
+    "long-short-position-ratio-contract-top-trader",
+    "long-short-account-ratio-contract",
+    "swap/trade",
+    "swap/depth",
+    "swap/depth_l2_tbt",
+    "swap/ticker",
+    "swap/liquidation",
+    "swap/funding_rate",
+    "swap/mark_price",
+    "index/ticker",
+    "system/status",
+    "information/sentiment",
+    "information/long_short_ratio",
+    "information/margin"
+  ],
+  "availableSymbols": [
+    {
+      "id": "BTC-USDT-SWAP",
+      "type": "perpetual",
+      "availableSince": "2019-12-04T00:00:00.000Z"
+    },
+    {
+      "id": "ETH-USDT-SWAP",
+      "type": "perpetual",
+      "availableSince": "2019-12-04T00:00:00.000Z"
+    },
+    {
+      "id": "GRT-USDT-SWAP",
+      "type": "perpetual",
+      "availableSince": "2020-12-20T00:00:00.000Z"
+    },
+    {
+      "id": "SOL-USDT-SWAP",
+      "type": "perpetual",
+      "availableSince": "2021-01-22T00:00:00.000Z"
+    }
+  ],
+  "channelDetails": [
+    {
+      "name": "trades",
+      "description": "Public swap trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-trades-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "trade"
+      ]
+    },
+    {
+      "name": "trades-all",
+      "description": "All trades stream including non-aggregated trade messages",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-all-trades-channel",
+      "apiVersion": "v5",
+      "availableSince": "2023-10-19T00:00:00.000Z",
+      "sourceFor": [
+        "trade"
+      ]
+    },
+    {
+      "name": "books-l2-tbt",
+      "description": "Tick-by-tick L2 swap order book updates",
+      "frequency": "10ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "availableTo": "2026-05-21T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "books",
+      "description": "Incremental swap order book depth updates",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "apiVersion": "v5",
+      "availableSince": "2023-02-24T00:00:00.000Z",
+      "additionalInfo": "Collected until 2024-07-19 and from 2026-05-21. Collected through books-l2-tbt between those dates.",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "bbo-tbt",
+      "description": "Tick-by-tick best bid and offer updates",
+      "frequency": "10ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "apiVersion": "v5",
+      "availableSince": "2022-05-05T00:00:00.000Z",
+      "sourceFor": [
+        "book_ticker"
+      ]
+    },
+    {
+      "name": "tickers",
+      "description": "24h swap ticker updates",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-tickers-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker",
+        "book_ticker"
+      ]
+    },
+    {
+      "name": "liquidations",
+      "description": "Liquidation events with at most one update per second per contract",
+      "frequency": "1s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-liquidation-orders-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "liquidation"
+      ]
+    },
+    {
+      "name": "liquidation-orders",
+      "description": "Liquidation orders with at most one update per second per contract",
+      "frequency": "1s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-liquidation-orders-channel",
+      "apiVersion": "v5",
+      "availableSince": "2023-03-30T00:00:00.000Z",
+      "sourceFor": [
+        "liquidation"
+      ]
+    },
+    {
+      "name": "open-interest",
+      "description": "Open interest updates",
+      "frequency": "3s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-open-interest-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ]
+    },
+    {
+      "name": "mark-price",
+      "description": "Mark price updates with keepalive up to 10s when unchanged",
+      "frequency": "200ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-mark-price-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ]
+    },
+    {
+      "name": "funding-rate",
+      "description": "Funding rate updates with upcoming funding time (30s to 90s cadence)",
+      "frequency": "30s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-funding-rate-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ]
+    },
+    {
+      "name": "index-tickers",
+      "description": "Index ticker updates with keepalive up to 1m when unchanged",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-index-tickers-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ]
+    },
+    {
+      "name": "price-limit",
+      "description": "Price limit updates",
+      "frequency": "200ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-price-limit-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z"
+    },
+    {
+      "name": "status",
+      "description": "Exchange status and maintenance notifications",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#status-ws-status-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z"
+    },
+    {
+      "name": "instruments",
+      "description": "Instrument state updates (listing, suspension, parameter changes)",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#public-data-websocket-instruments-channel",
+      "apiVersion": "v5",
+      "availableSince": "2021-12-23T00:00:00.000Z"
+    },
+    {
+      "name": "long-short-account-ratio",
+      "description": "Long/short account ratio snapshots from REST statistics endpoint",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#trading-statistics-rest-api-get-long-short-ratio",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "taker-volume",
+      "description": "Taker buy/sell volume snapshots from REST statistics endpoint",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#trading-statistics-rest-api-get-taker-volume",
+      "availableSince": "2021-12-23T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "public-block-trades",
+      "description": "Public block trades stream",
+      "frequency": "15m",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#block-trading-websocket-public-channel-public-block-trades-channel",
+      "apiVersion": "v5",
+      "availableSince": "2023-01-01T00:00:00.000Z"
+    },
+    {
+      "name": "public-struc-block-trades",
+      "description": "Public structured block trades stream",
+      "frequency": "15m",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#block-trading-websocket-public-channel-public-structure-block-trades-channel",
+      "apiVersion": "v5",
+      "availableSince": "2023-01-01T00:00:00.000Z"
+    },
+    {
+      "name": "taker-volume-contract",
+      "description": "Contract-level taker buy/sell volume snapshots from REST statistics endpoint",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#trading-statistics-rest-api-get-contract-taker-volume",
+      "availableSince": "2024-08-08T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "long-short-account-ratio-contract-top-trader",
+      "description": "Contract-level top-trader long/short account ratio snapshots from REST statistics endpoint",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#trading-statistics-rest-api-get-top-traders-contract-long-short-ratio",
+      "availableSince": "2024-08-08T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "long-short-position-ratio-contract-top-trader",
+      "description": "Contract-level top-trader long/short position ratio snapshots from REST statistics endpoint",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#trading-statistics-rest-api-get-top-traders-contract-long-short-ratio-by-position",
+      "availableSince": "2024-08-08T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "long-short-account-ratio-contract",
+      "description": "Contract-level long/short account ratio snapshots from REST statistics endpoint",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://www.okx.com/docs-v5/en/#trading-statistics-rest-api-get-contract-long-short-ratio",
+      "availableSince": "2024-08-08T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "swap/trade",
+      "description": "Public swap trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://web.archive.org/web/20210903151750/https://www.okex.com/docs/en/index-data.html",
+      "apiVersion": "v3",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "trade"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "swap/depth",
+      "description": "Incremental swap order book updates (legacy depth channel)",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://web.archive.org/web/20210903151750/https://www.okex.com/docs/en/index-data.html",
+      "apiVersion": "v3",
+      "availableTo": "2020-02-13T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "swap/depth_l2_tbt",
+      "description": "Tick-by-tick L2 swap order book updates with sequencing",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://web.archive.org/web/20210903151750/https://www.okex.com/docs/en/index-data.html",
+      "apiVersion": "v3",
+      "availableSince": "2020-02-07T00:00:00.000Z",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "book_change"
+      ]
+    },
+    {
+      "name": "swap/ticker",
+      "description": "24h swap ticker updates",
+      "frequency": "unknown",
+      "frequencySource": "inferred",
+      "apiVersion": "v3",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker",
+        "book_ticker"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "swap/liquidation",
+      "description": "Swap liquidation events",
+      "frequency": "unknown",
+      "frequencySource": "inferred",
+      "apiVersion": "v3",
+      "availableSince": "2020-12-18T00:00:00.000Z",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "liquidation"
+      ]
+    },
+    {
+      "name": "swap/funding_rate",
+      "description": "Funding rate updates",
+      "frequency": "unknown",
+      "frequencySource": "inferred",
+      "apiVersion": "v3",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "swap/mark_price",
+      "description": "Mark price with keepalive up to 10s when unchanged",
+      "frequency": "unknown",
+      "frequencySource": "inferred",
+      "apiVersion": "v3",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "sourceFor": [
+        "derivative_ticker"
+      ],
+      "availableSince": "2019-03-30T00:00:00.000Z"
+    },
+    {
+      "name": "index/ticker",
+      "description": "Index ticker for swap contracts with keepalive up to 1m when unchanged",
+      "frequency": "unknown",
+      "frequencySource": "inferred",
+      "apiVersion": "v3",
+      "availableSince": "2019-09-20T00:00:00.000Z",
+      "availableTo": "2021-12-23T00:00:00.000Z"
+    },
+    {
+      "name": "system/status",
+      "description": "Exchange status and maintenance notifications",
+      "frequency": "unknown",
+      "frequencySource": "inferred",
+      "apiVersion": "v3",
+      "availableSince": "2020-07-01T00:00:00.000Z",
+      "availableTo": "2021-12-23T00:00:00.000Z"
+    },
+    {
+      "name": "information/sentiment",
+      "description": "Market sentiment ratio metrics",
+      "frequency": "75s",
+      "frequencySource": "internal",
+      "availableSince": "2020-10-28T00:00:00.000Z",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "information/long_short_ratio",
+      "description": "Long/short account ratio metrics",
+      "frequency": "75s",
+      "frequencySource": "internal",
+      "availableSince": "2020-10-28T00:00:00.000Z",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "information/margin",
+      "description": "Margin ratio metrics",
+      "frequency": "75s",
+      "frequencySource": "internal",
+      "availableSince": "2020-10-28T00:00:00.000Z",
+      "availableTo": "2021-12-23T00:00:00.000Z",
+      "generated": true
+    }
+  ],
+  "apiDocsUrl": "https://www.okx.com/docs-v5/en/",
+  "dataCollectionDetails": {
+    "recorderDataCenter": {
+      "host": "GCP",
+      "regionId": "asia-northeast1",
+      "location": "Tokyo, Asia Pacific"
+    },
+    "recorderDataCenterChanges": [
+      {
+        "until": "2020-05-15T14:10:59.000Z",
+        "dataCenter": {
+          "host": "GCP",
+          "regionId": "europe-west2",
+          "location": "London, Europe"
+        }
+      },
+      {
+        "until": "2022-05-04T16:44:50.000Z",
+        "dataCenter": {
+          "host": "GCP",
+          "regionId": "asia-northeast1",
+          "location": "Tokyo, Asia Pacific"
+        }
+      },
+      {
+        "until": "2026-05-21T00:00:00.000Z",
+        "dataCenter": {
+          "host": "AWS",
+          "regionId": "ap-east-1",
+          "location": "Hong Kong, Asia Pacific"
+        }
+      }
+    ],
+    "wssConnection": {
+      "url": "wss://ws.okx.com:8443/ws/v5/public",
+      "apiVersion": "v5"
+    },
+    "wssConnectionChanges": [
+      {
+        "until": "2021-12-23T00:00:00.000Z",
+        "url": "wss://real.okex.com:8443/ws/v3",
+        "apiVersion": "v3"
+      },
+      {
+        "until": "2023-11-24T00:00:00.000Z",
+        "url": "wss://ws.okx.com:8443/ws/v5/public",
+        "apiVersion": "v5"
+      },
+      {
+        "until": "2026-05-21T00:00:00.000Z",
+        "url": "wss://awscolows1.okx.com:8443/ws/v5/public",
+        "apiVersion": "v5"
+      }
+    ],
+    "exchangeDataCenter": {
+      "host": "Alibaba",
+      "regionId": "cn-hongkong",
+      "location": "Hong Kong, Asia Pacific"
+    }
+  },
+  "datasets": {
+    "formats": [
+      "csv"
+    ],
+    "exportedFrom": "2019-03-30T00:00:00.000Z",
+    "exportedUntil": "2026-09-23T00:00:00.000Z",
+    "symbols": [
+      {
+        "id": "BTC-USDT-SWAP",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2019-12-04T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "ETH-USDT-SWAP",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2019-12-04T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "GRT-USDT-SWAP",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2020-12-20T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "SOL-USDT-SWAP",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2021-01-22T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      }
+    ]
+  },
+  "incidentReports": [
+    {
+      "from": "2026-08-13T14:33:00.000Z",
+      "to": "2026-08-13T14:36:00.000Z",
+      "status": "resolved",
+      "details": "Partial data gaps were caused by a brief connectivity interruption affecting real-time data collection. Normal recording resumed after the affected connections recovered."
+    },
+    {
+      "from": "2026-06-23T02:10:00.000Z",
+      "to": "2026-06-23T05:04:46.000Z",
+      "status": "resolved",
+      "details": "Missing data caused by a recorder deployment that included OKX preopen instruments whose upstream metadata was not yet subscribable. Empty OKX index identifiers caused repeated WebSocket subscription failures and reconnects. Normal recording resumed after rolling back to the previous recorder version."
+    },
+    {
+      "from": "2026-06-22T04:25:00.000Z",
+      "to": "2026-06-22T04:30:00.000Z",
+      "status": "resolved",
+      "details": "Missing data in exchange-specific minute slices caused by a transient Tokyo recorder infrastructure/network disruption. Some affected slices are empty or contain only reconnect markers. Normal recording resumed after reconnects completed around 2026-06-22T04:29:50 UTC."
+    },
+    {
+      "from": "2026-06-08T09:55:00.000Z",
+      "to": "2026-06-08T09:55:46.793Z",
+      "status": "resolved",
+      "details": "Short data gap caused by a Tokyo recorder stability issue. Recording resumed at 2026-06-08T09:55:46.793Z UTC."
+    },
+    {
+      "from": "2026-05-21T00:00:00.000Z",
+      "to": "2026-05-21T05:16:19.000Z",
+      "status": "resolved",
+      "details": "Missing data caused by infrastructure migration from the Hong Kong colocation cluster to the Tokyo recorder cluster. The migration was required because colocation access is no longer available for us and non-colocated OKX WebSocket URLs were not recording successfully from the Hong Kong cluster. From this point order book collection uses the public books channel instead of the colocation-only books-l2-tbt channel."
+    },
+    {
+      "from": "2025-11-06T14:07:00.000Z",
+      "to": "2025-11-06T14:37:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to AWS VM failure."
+    },
+    {
+      "from": "2025-09-22T06:03:00.000Z",
+      "to": "2025-09-22T06:20:00.000Z",
+      "status": "resolved",
+      "details": "Data loss occurred due to a surge of incoming data that exceeded the processing capacity of our infrastructure at that time."
+    },
+    {
+      "from": "2025-02-03T01:54:00.000Z",
+      "to": "2025-02-03T02:09:00.000Z",
+      "status": "resolved",
+      "details": "Data loss due to internal storage service issue, fix was implemented and deployed."
+    },
+    {
+      "from": "2024-05-09T07:37:00.000Z",
+      "to": "2024-05-09T08:16:00.000Z",
+      "status": "resolved",
+      "details": "Missing feed data due to ec2 instance failure and failover procedure."
+    },
+    {
+      "from": "2023-06-09T15:30:00.000Z",
+      "to": "2026-08-04T11:16:00.000Z",
+      "status": "resolved",
+      "details": "Some generated OKX statistics channels were collected less frequently than the documented 1-minute interval. The affected channels were long-short-account-ratio and taker-volume for OKX Futures and Swap, and taker-volume and loan-ratio for OKX Spot. Recent OKX Swap long-short-account-ratio data was typically recorded every 35-40 minutes. Other OKX channels were unaffected. The missing observations were not recorded and cannot be backfilled. Normal 1-minute collection resumed on 2026-08-04."
+    },
+    {
+      "from": "2023-02-24T09:50:00.000Z",
+      "to": "2023-02-24T11:20:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to AWS PrivateLink VPC colocation disabled by OKX for Tardis."
+    },
+    {
+      "from": "2022-08-17T09:42:00.000Z",
+      "to": "2022-08-17T10:13:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to AWS PrivateLink VPC colocation networking issue."
+    },
+    {
+      "from": "2022-08-04T15:03:00.000Z",
+      "to": "2022-08-04T15:28:00.000Z",
+      "status": "resolved",
+      "details": "Missing OKX Swap bbo-tbt, books-l2-tbt, and trades data caused by recorder storage/write errors that produced empty raw slices despite active feed processing. Normal recording resumed at 15:28 UTC."
+    },
+    {
+      "from": "2022-05-04T16:44:50.000Z",
+      "to": "2022-05-04T16:45:25.000Z",
+      "status": "resolved",
+      "details": "Missing data (~40 seconds) caused by moving OKX data collection infrastructure from Tokyo GKE cluster to AWS HongKong (AWS PrivateLink VPC colocation)."
+    },
+    {
+      "from": "2021-11-04T00:44:00.000Z",
+      "to": "2021-11-04T00:59:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to a bug that incorrectly assumed that data recording process was unhealthy and killed it causing data loss. Proper fix for this issue was deployed."
+    },
+    {
+      "from": "2021-05-12T07:02:00.000Z",
+      "to": "2021-05-12T07:42:00.000Z",
+      "status": "resolved",
+      "details": "GKE node network issue resulted triggering auto-repair logic and missing data in that period."
+    },
+    {
+      "from": "2021-03-05T14:14:00.000Z",
+      "to": "2021-03-05T14:23:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to virtual machine crash. Crash was caused by hardware issue on the physical machine hosting VM which has been automatically replaced with healthy one by auto-repair logic."
+    },
+    {
+      "from": "2021-03-05T00:32:00.000Z",
+      "to": "2021-03-05T02:14:00.000Z",
+      "status": "resolved",
+      "details": "Data gaps due to Cloudflare network issue that caused disconnects, high latency, and other connectivity failures, details: https://www.cloudflarestatus.com/incidents/q5wzxr0jhn90"
+    },
+    {
+      "from": "2021-02-27T00:00:00.000Z",
+      "to": "2021-02-27T06:44:00.000Z",
+      "status": "resolved",
+      "details": "Missing initial order book snapshots for swaps instruments. Issue has been identified and new version with fix deployed."
+    },
+    {
+      "from": "2020-06-11T18:32:00.000Z",
+      "to": "2020-06-11T19:55:00.000Z",
+      "status": "resolved",
+      "details": "Intermittent Kubernetes Node network issue caused increased disconnections count and establishing connection timeouts that resulted in missing data."
+    },
+    {
+      "from": "2020-05-15T14:10:59.000Z",
+      "to": "2020-05-15T14:11:06.000Z",
+      "status": "resolved",
+      "details": "Missing data (~7 seconds) caused by moving OKEx Swap data collection infrastructure from London to Tokyo GKE cluster."
+    },
+    {
+      "from": "2020-04-30T01:00:00.000Z",
+      "to": "2020-05-01T18:00:00.000Z",
+      "status": "resolved",
+      "details": "Increased disconnections count that was caused by OKEx API returning real-time data with too large delay (over 10 seconds). This issue has been reported also by other API users and could cause some data missing (due to disconnects). Since then we have switched to wss://awspush.okex.com:8443/ws/v3 WebSocket endpoint which seems to be more stable in that regard in comparison to default wss://real.okex.com:8443/ws/v3."
+    },
+    {
+      "from": "2019-07-26T21:10:00.000Z",
+      "to": "2019-07-26T21:26:00.000Z",
+      "status": "resolved",
+      "details": "K8S node where recording containers are running became unresponsive (network issue, no access to or from node) and has been automatically replaced with healthy node by auto-repair logic. Unfortunately that caused missing data feed for approximately 15 minutes."
+    }
+  ]
+}

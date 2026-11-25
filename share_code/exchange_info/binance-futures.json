@@ -1,0 +1,469 @@
+{
+  "id": "binance-futures",
+  "name": "Binance USDS-M Futures",
+  "enabled": true,
+  "availableSince": "2019-11-17T00:00:00.000Z",
+  "availableChannels": [
+    "trade",
+    "depth",
+    "depthSnapshot",
+    "bookTicker",
+    "forceOrder",
+    "ticker",
+    "markPrice",
+    "premiumIndex",
+    "indexConstituents",
+    "openInterest",
+    "fundingInfo",
+    "insuranceBalance",
+    "aggTrade",
+    "compositeIndex",
+    "assetIndex",
+    "topLongShortAccountRatio",
+    "topLongShortPositionRatio",
+    "globalLongShortAccountRatio",
+    "takerlongshortRatio",
+    "!contractInfo",
+    "recentTrades"
+  ],
+  "availableSymbols": [
+    {
+      "id": "btcusdt",
+      "type": "perpetual",
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "id": "ethusdt",
+      "type": "perpetual",
+      "availableSince": "2019-11-27T00:00:00.000Z"
+    },
+    {
+      "id": "grtusdt",
+      "type": "perpetual",
+      "availableSince": "2020-12-19T00:00:00.000Z"
+    },
+    {
+      "id": "solusdt",
+      "type": "perpetual",
+      "availableSince": "2020-09-14T00:00:00.000Z"
+    }
+  ],
+  "channelDetails": [
+    {
+      "name": "trade",
+      "description": "Public futures trade executions stream",
+      "frequency": "real-time",
+      "frequencySource": "inferred",
+      "sourceFor": [
+        "trade"
+      ],
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "name": "depth",
+      "description": "Incremental futures order book updates stream",
+      "additionalInfo": "Subscribed as depth@0ms with real-time dynamically adjusted update speed.",
+      "frequency": "real-time",
+      "frequencySource": "inferred",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Diff-Book-Depth-Streams",
+      "sourceFor": [
+        "book_change"
+      ],
+      "changes": [
+        {
+          "until": "2020-01-07T00:00:00.000Z",
+          "frequency": "100ms"
+        }
+      ],
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "name": "depthSnapshot",
+      "description": "Generated full order book snapshots stream",
+      "additionalInfo": "Binance USDT Futures real-time WebSocket API does not provide initial order book snapshots. To overcome this issue we fetch initial order book snapshots from REST API and store them together with the rest of the WebSocket messages (top 1000 levels). Snapshot messages are marked with \"stream\":\"<symbol>@depthSnapshot\" and \"generated\":true.\n\nDuring data collection, integrity of incremental order book updates is validated using sequence numbers from the real-time feed (pu and u fields). If a missed message is detected, the WebSocket connection is restarted. Initial book snapshots fetched from REST API are also validated for overlap with received depth messages.",
+      "frequency": "on-subscribe",
+      "frequencySource": "internal",
+      "generated": true,
+      "sourceFor": [
+        "book_change"
+      ],
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "name": "bookTicker",
+      "description": "Best bid and best ask updates stream",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Individual-Symbol-Book-Ticker-Streams",
+      "sourceFor": [
+        "book_ticker"
+      ],
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "name": "forceOrder",
+      "description": "Liquidation order stream publishing only the latest liquidation per symbol in each 1000ms window",
+      "frequency": "1s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Liquidation-Order-Streams",
+      "availableSince": "2020-01-07T00:00:00.000Z",
+      "sourceFor": [
+        "liquidation"
+      ]
+    },
+    {
+      "name": "ticker",
+      "description": "24h futures ticker updates stream",
+      "frequency": "2s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Individual-Symbol-Ticker-Streams",
+      "sourceFor": [
+        "derivative_ticker"
+      ],
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "name": "markPrice",
+      "description": "Mark price and funding metrics stream",
+      "additionalInfo": "Subscribed as @markPrice@1s.",
+      "frequency": "1s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Mark-Price-Stream",
+      "sourceFor": [
+        "derivative_ticker"
+      ],
+      "changes": [
+        {
+          "until": "2020-02-13T00:00:00.000Z",
+          "frequency": "3s"
+        }
+      ],
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "name": "premiumIndex",
+      "description": "Generated premium index snapshots stream",
+      "additionalInfo": "Snapshots are fetched from the REST premium index endpoint about every 6 seconds for all instruments. The recorder emits one generated message per instrument, marked as \"stream\":\"<symbol>@premiumIndex\" and \"generated\":true with REST response format. This channel includes the interestRate field that is not present on the WebSocket markPrice stream.",
+      "frequency": "6s",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Mark-Price",
+      "availableSince": "2026-04-11T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "indexConstituents",
+      "description": "Generated index price constituents snapshots stream",
+      "additionalInfo": "Snapshots are fetched from the REST index price constituents endpoint every minute per supported instrument. Messages are marked as \"stream\":\"<symbol>@indexConstituents\" and \"generated\":true with REST response format.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Index-Constituents",
+      "availableSince": "2026-04-23T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "openInterest",
+      "description": "Generated open interest snapshots stream",
+      "additionalInfo": "Snapshots are fetched from the REST open interest endpoint about every 6 seconds per instrument. Messages are marked as \"stream\":\"<symbol>@openInterest\" and \"generated\":true with REST response format.",
+      "frequency": "6s",
+      "frequencySource": "internal",
+      "availableSince": "2020-05-12T00:00:00.000Z",
+      "generated": true,
+      "sourceFor": [
+        "derivative_ticker"
+      ]
+    },
+    {
+      "name": "fundingInfo",
+      "description": "Generated funding info snapshots stream",
+      "additionalInfo": "Snapshots are fetched from the REST funding info endpoint every minute. Binance returns only symbols with adjusted funding cap, floor, or interval. Messages are marked as \"stream\":\"<symbol>@fundingInfo\" and \"generated\":true with REST response format.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Get-Funding-Rate-Info",
+      "availableSince": "2026-03-17T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "insuranceBalance",
+      "description": "Generated insurance fund balance snapshots stream",
+      "additionalInfo": "Snapshots are fetched from the REST insurance fund balance endpoint every minute. Messages are marked as \"stream\":\"insuranceBalance\" and \"generated\":true with REST response format.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Insurance-Fund-Balance",
+      "availableSince": "2026-03-17T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "aggTrade",
+      "description": "Aggregated futures trade executions stream",
+      "frequency": "100ms",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Aggregate-Trade-Streams",
+      "availableSince": "2019-11-17T00:00:00.000Z"
+    },
+    {
+      "name": "compositeIndex",
+      "description": "Composite index updates stream for multi-asset index symbols",
+      "frequency": "1s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Composite-Index-Symbol-Information-Streams",
+      "availableSince": "2020-10-28T00:00:00.000Z"
+    },
+    {
+      "name": "assetIndex",
+      "description": "Asset index updates stream",
+      "frequency": "1s",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Multi-Assets-Mode-Asset-Index",
+      "availableSince": "2023-06-16T00:00:00.000Z"
+    },
+    {
+      "name": "topLongShortAccountRatio",
+      "description": "Generated top trader long-short account ratio snapshots from REST endpoint for exchange-defined interval buckets.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "availableSince": "2020-10-28T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "topLongShortPositionRatio",
+      "description": "Generated top trader long-short position ratio snapshots from REST endpoint for exchange-defined interval buckets.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "availableSince": "2020-10-28T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "globalLongShortAccountRatio",
+      "description": "Generated global long-short account ratio snapshots from REST endpoint for exchange-defined interval buckets.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "availableSince": "2020-10-28T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "takerlongshortRatio",
+      "description": "Generated taker buy/sell volume ratio snapshots from REST endpoint for exchange-defined interval buckets.",
+      "frequency": "1m",
+      "frequencySource": "internal",
+      "availableSince": "2021-12-01T00:00:00.000Z",
+      "generated": true
+    },
+    {
+      "name": "!contractInfo",
+      "description": "Contract metadata updates stream pushed when listing, settlement, or bracket information changes",
+      "frequency": "real-time",
+      "frequencySource": "exchange-docs",
+      "exchangeDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Contract-Info-Stream",
+      "availableSince": "2023-07-24T00:00:00.000Z"
+    }
+  ],
+  "apiDocsUrl": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams",
+  "dataCollectionDetails": {
+    "recorderDataCenter": {
+      "host": "GCP",
+      "regionId": "asia-northeast1",
+      "location": "Tokyo, Asia Pacific"
+    },
+    "recorderDataCenterChanges": [
+      {
+        "until": "2020-05-14T00:00:00.000Z",
+        "dataCenter": {
+          "host": "GCP",
+          "regionId": "europe-west2",
+          "location": "London, Europe"
+        }
+      }
+    ],
+    "wssConnection": {
+      "url": "wss://fstream.binance.com/stream"
+    },
+    "exchangeDataCenter": {
+      "host": "AWS",
+      "regionId": "ap-northeast-1",
+      "location": "Tokyo, Asia Pacific"
+    }
+  },
+  "datasets": {
+    "formats": [
+      "csv"
+    ],
+    "exportedFrom": "2019-11-17T00:00:00.000Z",
+    "exportedUntil": "2026-09-23T00:00:00.000Z",
+    "symbols": [
+      {
+        "id": "BTCUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2019-11-17T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "ETHUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2019-11-27T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "GRTUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2020-12-19T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      },
+      {
+        "id": "SOLUSDT",
+        "type": "perpetual",
+        "dataTypes": [
+          "trades",
+          "incremental_book_L2",
+          "quotes",
+          "book_snapshot_5",
+          "book_snapshot_25",
+          "derivative_ticker",
+          "liquidations",
+          "book_ticker"
+        ],
+        "availableSince": "2020-09-14T00:00:00.000Z",
+        "availableTo": "2026-09-23T00:00:00.000Z"
+      }
+    ]
+  },
+  "incidentReports": [
+    {
+      "from": "2026-08-13T14:33:00.000Z",
+      "to": "2026-08-13T14:36:00.000Z",
+      "status": "resolved",
+      "details": "Partial data gaps were caused by a brief connectivity interruption affecting real-time data collection. Normal recording resumed after the affected connections recovered."
+    },
+    {
+      "from": "2026-07-27T22:40:00.000Z",
+      "to": "2026-07-28T08:45:00.000Z",
+      "status": "resolved",
+      "details": "Missing data caused by a wave of rapid WebSocket reconnects that exhausted Binance API rate limits and triggered repeated IP bans that were difficult to work around, prolonging recovery."
+    },
+    {
+      "from": "2026-07-14T12:30:07.786Z",
+      "to": "2026-07-14T14:10:47.151Z",
+      "status": "resolved",
+      "details": "Partial Binance Futures data gaps were caused by an internal rate-limit handling issue. After a WebSocket disconnect, REST requests for initial order book snapshots hit temporary Binance IP bans, causing repeated reconnects and missing real-time and generated REST data. Most channels progressively recovered between 12:58 and 13:00 UTC, and 13:01 UTC is the first complete minute. Open interest remained incomplete during recovery and was completely absent from 12:59 through 14:09 UTC. Normal open-interest recording resumed at 2026-07-14T14:10:47 UTC, with 14:11 UTC as its first complete minute. Request retry and rate-limit handling was corrected."
+    },
+    {
+      "from": "2026-06-22T04:25:00.000Z",
+      "to": "2026-06-22T04:30:00.000Z",
+      "status": "resolved",
+      "details": "Missing data in exchange-specific minute slices caused by a transient Tokyo recorder infrastructure/network disruption. Some affected slices are empty or contain only reconnect markers. Normal recording resumed after reconnects completed around 2026-06-22T04:29:50 UTC."
+    },
+    {
+      "from": "2026-06-12T03:58:00.000Z",
+      "to": "2026-06-12T04:28:50.000Z",
+      "status": "resolved",
+      "details": "Missing data caused by an internal recorder infrastructure failure. Normal recording resumed after automated recovery kicked-in."
+    },
+    {
+      "from": "2026-06-08T09:48:00.000Z",
+      "to": "2026-06-08T09:48:43.654Z",
+      "status": "resolved",
+      "details": "Short data gap caused by a Tokyo recorder stability issue. Recording resumed at 2026-06-08T09:48:43.654Z UTC."
+    },
+    {
+      "from": "2026-06-08T08:52:00.000Z",
+      "to": "2026-06-08T08:53:03.413Z",
+      "status": "resolved",
+      "details": "Short data gap caused by a Tokyo recorder stability issue. The 08:52 UTC minute slice contains only a reconnect marker; recording resumed at 2026-06-08T08:53:03.413Z UTC."
+    },
+    {
+      "from": "2026-05-21T16:31:00.000Z",
+      "to": "2026-05-21T16:57:00.000Z",
+      "status": "resolved",
+      "details": "Missing data caused by an internal recorder infrastructure failure. Normal recording resumed after automated recovery."
+    },
+    {
+      "from": "2026-03-26T08:34:51.160Z",
+      "to": "2026-03-26T08:44:59.308Z",
+      "status": "resolved",
+      "details": "Missing data caused by a recorder reconnect loop after repeated Binance Futures WebSocket read cancellations. Repeated full client rebuilds hit Binance REST -1003 rate limits while rebuilding subscriptions."
+    },
+    {
+      "from": "2025-08-29T06:18:03.205Z",
+      "to": "2025-08-29T06:37:04.820Z",
+      "status": "resolved",
+      "details": "Missing trade, bookTicker, and depth data caused by a Binance Futures exchange-side outage affecting USD-margined futures. Other lower-volume streams continued during the window. Normal trade recording resumed at 2025-08-29T06:37:04.820Z UTC."
+    },
+    {
+      "from": "2023-05-10T13:00:00.000Z",
+      "to": "2023-05-10T14:13:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to hitting Binance Futures rate limits for HTTP requests (403 error), fix was implemented (HTTP proxy & multiple IPs) and deployed."
+    },
+    {
+      "from": "2022-04-08T05:00:00.000Z",
+      "to": "2022-04-08T12:00:00.000Z",
+      "status": "resolved",
+      "details": "Increased disconnections count and WS connections timeouts resulting in small data gaps."
+    },
+    {
+      "from": "2022-03-06T21:10:00.000Z",
+      "to": "2022-03-07T02:43:00.000Z",
+      "status": "resolved",
+      "details": "Missing BTCUSDT instrument data caused by Binance API not publishing any messages over open connection except @markPrice stream, additional checks have been added to restart connection in such case."
+    },
+    {
+      "from": "2021-05-12T07:02:00.000Z",
+      "to": "2021-05-12T07:42:00.000Z",
+      "status": "resolved",
+      "details": "GKE node network issue resulted triggering auto-repair logic and missing data in that period."
+    },
+    {
+      "from": "2021-03-05T14:14:00.000Z",
+      "to": "2021-03-05T14:23:00.000Z",
+      "status": "resolved",
+      "details": "Missing data due to virtual machine crash. Crash was caused by hardware issue on the physical machine hosting VM which has been automatically replaced with healthy one by auto-repair logic."
+    },
+    {
+      "from": "2020-06-11T18:32:00.000Z",
+      "to": "2020-06-11T19:55:00.000Z",
+      "status": "resolved",
+      "details": "Intermittent Kubernetes Node network issue caused increased disconnections count and establishing connection timeouts that resulted in missing data."
+    },
+    {
+      "from": "2020-05-14T12:29:59.000Z",
+      "to": "2020-05-14T12:30:07.000Z",
+      "status": "resolved",
+      "details": "Missing data (~8 seconds) caused by moving Binance Futures data collection infrastructure from London to Tokyo GKE cluster."
+    },
+    {
+      "from": "2020-01-06T00:00:00.000Z",
+      "to": "2020-02-28T00:00:00.000Z",
+      "status": "resolved",
+      "details": "Occasional initial order book snapshots not overlapping with depthUpdate messages for all instruments. This bug has been introduced when switching to @0ms depth channel. Logic that was checking mentioned scenario was not validating correctly @depth@0ms messages."
+    }
+  ]
+}
