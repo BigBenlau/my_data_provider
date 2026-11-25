@@ -8,6 +8,8 @@
 | 02 正規化 | `02_normalize_tardis.py` | `output/02_tardis/<run>/`，目前只支援 Binance |
 | 03 對帳 | `03_compare_tardis.py` | `output/03_comparison/<run>/` |
 
+第一次運行請看[從 01 採集到 02 生成 Tardis CSV](RUN_01_02.md)。指南使用同一個 Binance 批次完成 30 秒採集、停止排空、離線正規化與結果檢查。
+
 ## 啟動 Docker 採集
 
 從 Git 建置映像、執行 30 秒短測、啟停正式採集及掛載資料卷的步驟見 [Docker 部署指南](DOCKER_DEPLOYMENT.md)。

@@ -29,6 +29,7 @@
 !/tardis_sample/step2/compose.yaml
 !/tardis_sample/step2/collector.service.example
 !/tardis_sample/step2/README.md
+!/tardis_sample/step2/RUN_01_02.md
 !/tardis_sample/step2/DOCKER_DEPLOYMENT.md
 !/tardis_sample/step2/AGENTS.md
 !/tardis_sample/step2/SOURCE_COVERAGE.md
