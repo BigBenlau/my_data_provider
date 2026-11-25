@@ -70,4 +70,4 @@ docker run --rm --init --name "collector-${EXCHANGE}-short-test" \
 
 `--data-volume` 必須與主管實際掛載於 `/data` 的 volume 相同。與 `--host-output` 互斥。其他交易所替換 `--exchange`、容器名稱及 volume 名稱即可，worker 程式完全相同。正式採集才移除 `--duration` 並使用背景執行及重啟政策。不可同時啟動兩個主管寫同一 volume。
 
-停止並排空後，五家交易所都可掛載各自的 volume 匯出原生 channel CSV。Binance 批次另可接續第 02 階段正規化與第 03 階段對帳。備份需包含 JSONL、manifest 及狀態。只取 channel CSV 不足以恢復採集。不要刪除尚未備份的 volume，也不要以執行中資料的普通檔案複製代替一致性備份。
+停止並排空後，五家交易所都可掛載各自的 volume 匯出原生 channel CSV。各家批次可使用同一映像中的 `02_normalize_tardis_<交易所>.py` 離線正規化，再將該家的輸出交給第 03 階段對帳。備份需包含 JSONL、manifest 及狀態。只取 channel CSV 不足以恢復採集。不要刪除尚未備份的 volume，也不要以執行中資料的普通檔案複製代替一致性備份。

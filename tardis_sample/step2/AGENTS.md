@@ -6,7 +6,7 @@
 
 - `01_collect.py` 與 `collectors/` 只負責原始採集、原文保存、來源識別、連線管理、REST 排程及採集日誌。
 - 採集端不得建立或合併 L2 訂單簿、計算 quotes、合併 ticker／markPrice／OI、過濾成交類別或進行行情語義去重。可觀察更新序號並記錄缺口、要求補取新快照，但不得改寫原文或宣稱訂單簿已同步。
-- `02_normalize_tardis.py` 才負責訂單簿重建、欄位映射、狀態合併與正規化去重；只讀已保存的原始資料。
+- `02_normalize_tardis_<交易所>.py` 才負責訂單簿重建、欄位映射、狀態合併與正規化去重；只讀已保存的原始資料。
 - `03_compare_tardis.py` 只負責與參考資料對帳。三階段程式名稱、輸出目錄及執行方式必須分開。
 
 ## Supervisor 副本整合例外
@@ -15,9 +15,9 @@
 
 ## 每次修改正規化前，必須重新核對 GitHub
 
-每次修改 `02_normalize_tardis.py`，或修改會影響其輸出的共用函式、欄位、時間、排序、去重、快照及狀態規則，都必須在當次任務重新連線讀取下列 GitHub 原碼，不能只依賴記憶、舊摘要或本地 `reference/`：
+每次修改 `02_normalize_tardis_<交易所>.py`，或修改會影響其輸出的共用函式、欄位、時間、排序、去重、快照及狀態規則，都必須在當次任務重新連線讀取下列 GitHub 原碼，不能只依賴記憶、舊摘要或本地 `reference/`：
 
-1. Binance mapper：<https://github.com/tardis-dev/tardis-node/blob/master/src/mappers/binance.ts>
+1. 核對對應交易所的 mapper（Binance、Bybit V5、OKX 的 okex.ts、Coinbase 或 Upbit），並沿用原有的 Binance 核對基準：<https://github.com/tardis-dev/tardis-node/blob/master/src/mappers/binance.ts>
 2. ticker 狀態 helper：<https://github.com/tardis-dev/tardis-node/blob/master/src/mappers/mapper.ts>
 3. 涉及 quotes 時，另讀 <https://github.com/tardis-dev/tardis-node/blob/master/src/computable/booksnapshot.ts> 及 <https://github.com/tardis-dev/tardis-node/blob/master/src/orderbook.ts>。
 

@@ -5,10 +5,10 @@
 | 階段 | 入口 | 輸出 |
 |---|---|---|
 | 01 原始採集 | `01_collect.py cluster` | `output/01_raw/<run>/<exchange>/` 的合併 JSONL；以 `export-csv` 按需產生原生 channel CSV.gz |
-| 02 正規化 | `02_normalize_tardis.py` | `output/02_tardis/<run>/`，目前只支援 Binance |
+| 02 正規化 | `02_normalize_tardis_<交易所>.py` | `output/02_tardis/<run>/<交易所>/` |
 | 03 對帳 | `03_compare_tardis.py` | `output/03_comparison/<run>/` |
 
-第一次運行請看[五家交易所操作指南](RUN_01_02.md)。可選一家或多家做 30 秒短測、同時啟動長期採集，並逐家匯出原生 channel CSV。Binance 批次另可接續第 02 階段產生 Tardis CSV。
+第一次運行請看[五家交易所操作指南](RUN_01_02.md)。可選一家或多家做 30 秒短測、同時啟動長期採集，並逐家匯出原生 channel CSV。五家可分別執行第 02 階段產生 Tardis CSV。
 
 ## 啟動 Docker 採集
 
@@ -138,14 +138,14 @@ REST 租約與配額跨 A/B/C 共用，換代不重置。Binance 以 exchangeInf
 ## 第 02／03 階段
 
 ```bash
-python 02_normalize_tardis.py --input output/01_raw/run-001/binance \
-  --output output/02_tardis/run-001
+python 02_normalize_tardis_binance.py --input output/01_raw/run-001/binance \
+  --output output/02_tardis/run-001/binance
 python 03_compare_tardis.py --help
 ```
 
-Binance 正規化獨立產生 book_ticker、trades、quotes、liquidations、derivative_ticker。只有第 02 階段才過濾 off-book 成交、合併 ticker 狀態及建立完整已知 L2。第三版以 REST `request_started_us` 重建候選快照緩存，邏輯 session 不隨 A/B 換代；序號缺口時停產 quotes，等新快照接合。Bybit、OKX、Coinbase、Upbit 的 Tardis 正規化仍未實作，程式會明確拒絕，不產生看似相容的 CSV。
+入口的交易所名稱為 `binance`、`bybit`、`okx`、`coinbase`、`upbit`。每家使用各自的原生欄位、成交方向、事件時間及訂單簿協議。Binance 沿用 REST 快照與 WS 深度接合，序號缺口後等待新快照。Bybit、OKX 和 Coinbase 各自區分原生一檔行情與由 L2 推導的 quotes。Upbit 的 quotes 取自完整 orderbook 快照。按市場列出的資料類型、來源差異及 Docker 命令見[五家交易所操作指南](RUN_01_02.md)。
 
-本次重新核對 GitHub 同一 commit `8b27eac3bc32a1007430b340983039d623c04dc4` 的四個 Tardis 原始檔；版本、永久連結、SHA-256 與本地有意差異見 [reference/README.md](reference/README.md)。正規化報告記錄版本，完整性另看輸入健康與缺口。不是重現特定歷史日，也不承諾本機接收時間或逐列內容等同 Tardis。
+正規化報告記錄上游 commit、本地程式雜湊、行數及來源限制。欄位、快照、時間及去重差異見[原碼核對紀錄](reference/README.md)。
 
 ## 程式分工與測試
 
@@ -161,7 +161,7 @@ Binance 正規化獨立產生 book_ticker、trades、quotes、liquidations、der
 | `channel_export.py`、`raw.py` | 按需增量壓縮 CSV、原始格式與歷史重播 |
 | `retention.py` | 無損壓縮、熱／歷史索引封存與崩潰邊界 |
 | `collectors/*.py` | 五家交易所各自的協議規則 |
-| `02_normalize_tardis.py`、`03_compare_tardis.py` | 獨立正規化與對帳 |
+| `02_normalize_tardis_<交易所>.py`、`03_compare_tardis.py` | 獨立正規化與對帳 |
 
 ```bash
 python -m unittest discover -s tests -v
