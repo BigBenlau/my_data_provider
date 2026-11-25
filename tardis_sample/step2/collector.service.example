@@ -1,0 +1,21 @@
+# 安裝前請設定執行帳戶、工作目錄，以及 Python、專案與輸出路徑。
+[Unit]
+Description=Public market raw data collector
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/ABSOLUTE/PATH/TO/PROJECT
+ExecStart=/ABSOLUTE/PATH/TO/PROJECT/.venv/bin/python -u /ABSOLUTE/PATH/TO/PROJECT/tardis_sample/step2/01_collect.py supervise --output /ABSOLUTE/PATH/TO/PROJECT/tardis_sample/step2/output/01_raw/binance
+Restart=on-failure
+RestartPreventExitStatus=74
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

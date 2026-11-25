@@ -1,0 +1,6 @@
+**/__pycache__
+**/*.pyc
+step2/output
+step2/evidence
+step2/tests
+**/.DS_Store

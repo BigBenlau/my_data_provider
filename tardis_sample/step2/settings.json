@@ -1,0 +1,191 @@
+{
+  "markets": [
+    "binance",
+    "binance-futures"
+  ],
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "GRTUSDT"
+  ],
+  "spot_ws": [
+    "wss://stream.binance.com/stream",
+    "wss://stream.binance.com:9443/stream"
+  ],
+  "futures_ws": {
+    "public": [
+      "wss://fstream.binance.com/public/stream",
+      "wss://fstream.binance.com/stream"
+    ],
+    "market": [
+      "wss://fstream.binance.com/market/stream"
+    ],
+    "trade": [
+      "wss://fstream.binance.com/stream",
+      "wss://fstream.binance.com/public/stream",
+      "wss://fstream.binance.com/market/stream"
+    ]
+  },
+  "rest": {
+    "binance": "https://api.binance.com/api/v3",
+    "binance-futures": "https://fapi.binance.com/fapi/v1"
+  },
+  "proxy": "environment",
+  "ws_attempts_per_5min": 150,
+  "queue_capacity": 100000,
+  "min_free_gib": 2,
+  "segment_seconds": 60,
+  "snapshot_interval": 300,
+  "oi_interval": 6,
+  "heartbeat_seconds": 5,
+  "ws_max_age": 82800,
+  "rest_timeout": 12,
+  "stale_seconds": {
+    "trade": 120,
+    "bookTicker": 60,
+    "depth": 60,
+    "ticker": 15,
+    "markPrice@1s": 10,
+    "openInterest": 30
+  },
+  "rest_weight_per_minute": {
+    "binance": 1200,
+    "binance-futures": 1200
+  },
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5,
+  "exchanges": {
+    "binance": {
+      "markets": {
+        "binance": {
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "GRTUSDT"
+          ],
+          "channels": [
+            "trade",
+            "bookTicker",
+            "depth@100ms",
+            "depthSnapshot"
+          ]
+        },
+        "binance-futures": {
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "GRTUSDT"
+          ],
+          "channels": [
+            "trade",
+            "bookTicker",
+            "depth@0ms",
+            "depthSnapshot",
+            "ticker",
+            "markPrice@1s",
+            "openInterest",
+            "forceOrder"
+          ]
+        }
+      }
+    },
+    "bybit": {
+      "markets": {
+        "bybit": {
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT"
+          ],
+          "channels": [
+            "publicTrade",
+            "orderbook.50",
+            "orderbook.1",
+            "tickers",
+            "allLiquidation"
+          ]
+        },
+        "bybit-spot": {
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT"
+          ],
+          "channels": [
+            "publicTrade",
+            "orderbook.50",
+            "orderbook.1",
+            "tickers"
+          ]
+        }
+      }
+    },
+    "okx": {
+      "markets": {
+        "okex": {
+          "symbols": [
+            "BTC-USDT",
+            "ETH-USDT",
+            "SOL-USDT"
+          ],
+          "channels": [
+            "trades",
+            "books",
+            "bbo-tbt",
+            "tickers"
+          ]
+        },
+        "okex-swap": {
+          "symbols": [
+            "BTC-USDT-SWAP",
+            "ETH-USDT-SWAP",
+            "SOL-USDT-SWAP"
+          ],
+          "channels": [
+            "trades",
+            "books",
+            "bbo-tbt",
+            "tickers",
+            "mark-price",
+            "funding-rate",
+            "open-interest"
+          ]
+        }
+      }
+    },
+    "coinbase": {
+      "markets": {
+        "coinbase": {
+          "symbols": [
+            "BTC-USD",
+            "ETH-USD",
+            "SOL-USD"
+          ],
+          "channels": [
+            "matches",
+            "level2_batch",
+            "ticker"
+          ]
+        }
+      }
+    },
+    "upbit": {
+      "markets": {
+        "upbit": {
+          "symbols": [
+            "KRW-BTC",
+            "KRW-ETH",
+            "KRW-SOL"
+          ],
+          "channels": [
+            "trade",
+            "orderbook"
+          ]
+        }
+      }
+    }
+  }
+}

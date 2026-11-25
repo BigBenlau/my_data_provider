@@ -1,0 +1,40 @@
+# 預設忽略所有路徑，只收錄下列原始碼與專案必要檔案。
+*
+!/.gitignore
+
+# 保留下載及解壓工具。下載的資料與交易所 metadata 由使用者在本機準備。
+!/share_code/
+!/share_code/*.py
+!/tardis_sample/
+!/tardis_sample/*.py
+!/tardis_sample/.dockerignore
+
+# 分析程式與依賴。研究結果、樣本及報告均留在本機。
+!/tardis_sample/step1/
+!/tardis_sample/step1/*.py
+!/tardis_sample/step1/requirements-analysis.txt
+!/tardis_sample/step1/README.md
+!/tardis_sample/step1/AGENTS.md
+
+# 採集、正規化、對帳及測試。只允許已知的部署設定與操作文件。
+!/tardis_sample/step2/
+!/tardis_sample/step2/*.py
+!/tardis_sample/step2/.gitignore
+!/tardis_sample/step2/settings.json
+!/tardis_sample/step2/requirements.txt
+!/tardis_sample/step2/Dockerfile
+!/tardis_sample/step2/compose.yaml
+!/tardis_sample/step2/collector.service.example
+!/tardis_sample/step2/README.md
+!/tardis_sample/step2/AGENTS.md
+!/tardis_sample/step2/SOURCE_COVERAGE.md
+!/tardis_sample/step2/collectors/
+!/tardis_sample/step2/collectors/*.py
+!/tardis_sample/step2/tests/
+!/tardis_sample/step2/tests/*.py
+
+# 固定版本的上游參考原碼、授權與版本說明隨程式保存。
+!/tardis_sample/step2/reference/
+!/tardis_sample/step2/reference/*.ts
+!/tardis_sample/step2/reference/LICENSE
+!/tardis_sample/step2/reference/README.md
