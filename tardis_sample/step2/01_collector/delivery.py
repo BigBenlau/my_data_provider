@@ -18,18 +18,25 @@ from .redundancy import stable_json, source_inventory
 from .replica_protocol import atoms
 from .retention import IndexArchive, sync_directory
 
+MAX_PACKET_BYTES = 32 * 1024**2
+
 
 async def read_packet(reader):
     # 長度前綴避免大型 depth 訊息碰到逐行讀取限制，並限制單封包記憶體。
     size = struct.unpack('!I', await reader.readexactly(4))[0]
-    if size > 32 * 1024**2: raise ValueError('IPC packet too large')
-    return json.loads(await reader.readexactly(size))
+    if size > MAX_PACKET_BYTES: raise ValueError('IPC packet too large')
+    data = await reader.readexactly(size)
+    if size >= 64 * 1024:
+        return await asyncio.to_thread(json.loads, data)
+    return json.loads(data)
 
 
 async def write_packet(writer, value):
     # 排程器與網路收訊分開；IPC 壅塞只延後交付，不丟棄 spool。
-    data = stable_json(value).encode()
-    writer.write(struct.pack('!I', len(data)) + data)
+    data = value if isinstance(value, bytes) else stable_json(value).encode()
+    if len(data) > MAX_PACKET_BYTES: raise ValueError('IPC packet too large')
+    writer.write(struct.pack('!I', len(data)))
+    writer.write(data)
     await writer.drain()
 
 
@@ -50,8 +57,9 @@ def database(path):
 
 def disk_guard(path, reserve):
     # 寫入前檢查保留空間；不足時停止而不是刪除未確認資料。
-    if shutil.disk_usage(path).free < reserve * 1024**3:
-        raise StorageError('free disk below configured reserve')
+    free = shutil.disk_usage(path).free
+    if free < reserve * 1024**3:
+        raise StorageError(f'free disk below configured reserve: free_bytes={free} reserve_gib={reserve}')
 
 
 class Spool:
@@ -60,6 +68,8 @@ class Spool:
         # 復用同 worker 的序號；容器重啟不覆蓋未交付內容。
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.options = options; self.lock = threading.RLock()
+        self.space = threading.Condition(self.lock)
+        self.capacity_waits = 0; self.last_capacity_warning = None
         self.memory_lock = threading.Lock(); self.queued_bytes = 0
         self.db = database(self.root / 'spool.sqlite')
         self.db.executescript('CREATE TABLE IF NOT EXISTS items(seq INTEGER PRIMARY KEY,payload TEXT);'
@@ -67,41 +77,79 @@ class Spool:
                              'INSERT OR IGNORE INTO state VALUES(1,0,0);')
         self.seq, self.ack = self.db.execute('SELECT seq,ack FROM state').fetchone()
         self.written = self.seq; self.error = None; self.high_water = 0
-        self.bytes = self.db.execute('SELECT coalesce(sum(length(cast(payload AS BLOB))),0) FROM items').fetchone()[0]
+        self.sent_range = None
+        self.bytes = self.restore_usage()
         self.oldest_us = 0; self.last_checkpoint = time.monotonic(); self.refresh_oldest()
         self.queue = queue.Queue(100000); self.last_write = time.monotonic()
         self.thread = threading.Thread(target=self.loop, daemon=True, name='durable-spool')
         self.thread.start()
 
+    def restore_usage(self):
+        # 用同一交易保存的游標與位元組計數恢復；舊版或離線排空後游標不同才掃描 payload。
+        with self.db:
+            self.db.execute('CREATE TABLE IF NOT EXISTS spool_usage(id INTEGER PRIMARY KEY,written INTEGER,ack INTEGER,bytes INTEGER)')
+            row = self.db.execute('SELECT bytes FROM spool_usage WHERE id=1 AND written=? AND ack=? AND bytes>=0',
+                                  (self.written, self.ack)).fetchone()
+            if row:
+                return row[0]
+            size = self.db.execute('SELECT coalesce(sum(length(cast(payload AS BLOB))),0) FROM items').fetchone()[0]
+            self.save_usage(self.written, self.ack, size)
+            return size
+
+    def save_usage(self, written, ack, size):
+        # 呼叫端在新增或清理 items 的同一筆交易內更新，故障後可一致地重啟。
+        self.db.execute('INSERT OR REPLACE INTO spool_usage VALUES(1,?,?,?)', (written, ack, size))
+
     def emit(self, record):
         # 不在收訊主循環執行 fsync；容量滿時立即回報致命儲存錯誤。
         if self.error: raise StorageError(str(self.error))
-        self.seq += 1
-        record = dict(record, delivery_sequence=self.seq)
-        payload = stable_json(record)
         with self.memory_lock:
-            self.queued_bytes += len(payload.encode())
-            if self.queued_bytes > self.options.get('memory_queue_bytes', 64 * 1024**2):
-                raise StorageError('spool memory byte limit exceeded')
-        try: self.queue.put_nowait((self.seq, payload))
-        except queue.Full as exc: raise StorageError('spool memory queue full') from exc
+            # 只有成功進入佇列才推進接收計數；被拒絕的資料不計入可交付範圍。
+            sequence = self.seq + 1
+            payload = stable_json(dict(record, delivery_sequence=sequence))
+            size = len(payload.encode())
+            limit = self.options.get('memory_queue_bytes', 64 * 1024**2)
+            if self.queued_bytes + size > limit:
+                raise StorageError(f'spool memory byte limit exceeded: queued_bytes={self.queued_bytes} record_bytes={size} limit_bytes={limit}')
+            try: self.queue.put_nowait((sequence, payload))
+            except queue.Full as exc: raise StorageError('spool memory queue full') from exc
+            self.seq = sequence
+            self.queued_bytes += size
         self.high_water = max(self.high_water, self.queue.qsize())
         return self.seq
 
     def write(self, batch):
         # 序號與 payload 在同一交易提交，禁止傳送尚未持久化的資料。
-        disk_guard(self.root, self.options['min_free_gib'])
         size = sum(len(p.encode()) for _, p in batch)
-        with self.lock:
-            if self.bytes + size > self.options['spool_max_bytes']:
-                raise StorageError('unacknowledged spool exceeds capacity')
+        with self.space:
+            self.wait_for_space(size)
+            disk_guard(self.root, self.options['min_free_gib'])
             with self.db:
                 self.db.executemany('INSERT INTO items VALUES(?,?)', batch)
                 self.db.execute('UPDATE state SET seq=? WHERE id=1', (batch[-1][0],))
+                self.save_usage(batch[-1][0], self.ack, self.bytes + size)
             self.written = batch[-1][0]; self.bytes += size
             if not self.oldest_us: self.refresh_oldest()
             self.last_write = time.monotonic()
         with self.memory_lock: self.queued_bytes -= size
+
+    def wait_for_space(self, size):
+        # 只有邏輯額度短缺可短暫等待；等待時釋放 SQLite 鎖，讓交付執行緒接收 ACK。
+        limit = self.options['spool_max_bytes']
+        if self.bytes + size <= limit:
+            return
+        timeout = self.options.get('spool_capacity_wait_seconds', 10)
+        if size <= limit and timeout > 0:
+            disk_guard(self.root, self.options['min_free_gib'])
+            self.capacity_waits += 1
+            now = time.monotonic()
+            if self.last_capacity_warning is None or now - self.last_capacity_warning >= 10:
+                LOG.warning('event=spool_waiting_for_ack root=%s pending_bytes=%s batch_bytes=%s wait_s=%s',
+                            self.root, self.bytes, size, timeout)
+                self.last_capacity_warning = now
+            if self.space.wait_for(lambda: self.bytes + size <= limit, timeout):
+                return
+        raise StorageError(f'unacknowledged spool exceeds capacity: pending_bytes={self.bytes} batch_bytes={size} limit_bytes={limit}')
 
     def loop(self):
         # 將短時間內收到的訊息合成一筆磁碟交易；任何錯誤都通知主程序。
@@ -121,16 +169,33 @@ class Spool:
             self.error = exc
             LOG.exception('event=spool_failed root=%s', self.root)
 
-    def pending(self):
-        # 傳送器只讀已提交的批次，限制單次訊息大小。
-        rows = []; size = 0
+    def pending_packet(self):
+        # spool 已保存合法的 UTF-8 JSON；直接裝入原有 IPC 封裝，按完整封包的位元組數切批。
+        prefix, suffix = b'{"batch":[', b'],"type":"batch"}'
+        limit = min(self.options.get('batch_max_bytes', 16 * 1024**2), MAX_PACKET_BYTES)
+        rows = []
+        size = len(prefix) + len(suffix)
+        payload_bytes = 0
         with self.lock:
-            cursor = self.db.execute('SELECT seq,payload FROM items ORDER BY seq LIMIT ?', (self.options['batch_size'],))
-            for row in cursor:
-                length = len(row[1].encode())
-                if rows and size + length > self.options.get('batch_max_bytes', 16 * 1024**2): break
-                rows.append(row); size += length
-        return [{'seq': n, 'record': json.loads(p)} for n, p in rows]
+            cursor = self.db.execute('SELECT seq,cast(payload AS BLOB) FROM items ORDER BY seq LIMIT ?', (self.options['batch_size'],))
+            for seq, payload in cursor:
+                item = b'{"record":' + payload + b',"seq":' + str(seq).encode('ascii') + b'}'
+                size += len(item) + bool(rows)
+                if rows and size > limit:
+                    break
+                if size > MAX_PACKET_BYTES:
+                    raise StorageError(f'durable record exceeds IPC limit: seq={seq} packet_bytes={size}')
+                rows.append(item)
+                payload_bytes += len(payload)
+                last = seq
+            if rows:
+                self.sent_range = (self.ack, last, payload_bytes)
+        return prefix + b','.join(rows) + suffix if rows else b''
+
+    def pending(self):
+        # 保留以物件讀取待送批次的介面，正式收訊流程直接傳送編碼後的封包。
+        packet = self.pending_packet()
+        return json.loads(packet)['batch'] if packet else []
 
     def acknowledge(self, sequence):
         # ACK 只能前進到已落盤位置；清理 payload 但保留持久序號。
@@ -138,12 +203,18 @@ class Spool:
             if sequence < self.ack or sequence > self.written:
                 raise ValueError('invalid supervisor acknowledgement')
             # 只計算本次確認的前綴，避免積壓越大、每次確認越慢。
-            released = self.db.execute('SELECT coalesce(sum(length(cast(payload AS BLOB))),0) FROM items WHERE seq<=?', (sequence,)).fetchone()[0]
+            if self.sent_range and self.sent_range[:2] == (self.ack, sequence):
+                released = self.sent_range[2]
+            else:
+                released = self.db.execute('SELECT coalesce(sum(length(cast(payload AS BLOB))),0) FROM items WHERE seq<=?', (sequence,)).fetchone()[0]
             with self.db:
                 self.db.execute('DELETE FROM items WHERE seq<=?', (sequence,))
                 self.db.execute('UPDATE state SET ack=? WHERE id=1', (sequence,))
+                self.save_usage(self.written, sequence, self.bytes - released)
+            self.sent_range = None
             self.ack = sequence
             self.bytes -= released; self.refresh_oldest()
+            self.space.notify_all()
             if not self.bytes and time.monotonic() - self.last_checkpoint >= 60:
                 self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)'); self.last_checkpoint = time.monotonic()
 
@@ -160,6 +231,11 @@ class Spool:
         self.thread.join(timeout=60)
         if self.thread.is_alive(): raise StorageError('spool drain timeout')
         if self.error: raise StorageError(str(self.error))
+
+    def close_database(self):
+        # sender 取消後背景查詢可能仍在執行；取得同一把鎖才關閉 SQLite。
+        with self.lock:
+            self.db.close()
 
 
 SCHEMA = '''
@@ -191,9 +267,10 @@ CREATE TABLE IF NOT EXISTS maintenance(name TEXT PRIMARY KEY,value TEXT);
 
 class MergeStore:
     """唯一合併資料庫；JSONL 提交後才確認輸入，不永久保存副本原文。"""
-    def __init__(self, root, config):
+    def __init__(self, root, config, *, background_notices=False):
         # 先恢復未完成提交，再允許 worker 取得 ACK。
         self.root = Path(root); self.options = config['redundancy']; self.config = config
+        self.background_notices = background_notices
         (self.root / 'raw').mkdir(parents=True, exist_ok=True)
         self.db = database(self.root / '_state' / 'merge.sqlite')
         # 隨機事件索引需要足夠快取；避免容器 bind mount 頻繁讀取索引頁。
@@ -278,14 +355,25 @@ class MergeStore:
         self.db.execute('INSERT INTO notices(level,body) VALUES(?,?)',
                         ('INFO' if event in ('connect_attempt', 'first_message') else 'WARNING', stable_json(dict(event=event, **fields))))
 
-    def drain_notices(self):
-        # 日誌可能在崩潰邊界重複，但不能遺失已提交的故障通知。
-        rows = self.db.execute('SELECT * FROM notices ORDER BY id').fetchall()
+    def pending_notices(self):
+        # 固定批次讀取已落盤的通知，避免異常風暴一次佔滿記憶體。
+        return self.db.execute('SELECT id,level,body FROM notices ORDER BY id LIMIT 256').fetchall()
+
+    @staticmethod
+    def print_notices(rows):
+        # 終端與檔案寫入可能很慢，主管在提交鎖外完成。
         for ident, level, body in rows:
             LOG.log(getattr(logging, level), 'event=replica_notice details=%s', body)
-        # 每批只做一次日誌游標交易，避免異常較多時每行都觸發磁碟同步。
-        if rows:
-            with self.db: self.db.execute('DELETE FROM notices WHERE id<=?', (rows[-1][0],))
+
+    def confirm_notices(self, last_id):
+        # 僅在日誌輸出後刪除本批，崩潰重播可能重印但不會跨過待寫通知。
+        with self.db: self.db.execute('DELETE FROM notices WHERE id<=?', (last_id,))
+
+    def drain_notices(self):
+        # 離線重播與正常結束時，印完尚未交給日誌的所有批次。
+        while rows := self.pending_notices():
+            self.print_notices(rows)
+            self.confirm_notices(rows[-1][0])
 
     def ingest(self, worker, batch):
         # 一批輸入先記錄去重決策與待寫內容；ACK 晚於 flush。
@@ -306,7 +394,8 @@ class MergeStore:
             indexed = time.monotonic()
             self.flush()
             flushed = time.monotonic()
-            self.drain_notices()
+            if not self.background_notices:
+                self.drain_notices()
             self.metrics = dict(batch_records=len(batch), index_ms=round((indexed-started)*1000, 3),
                                 persist_ms=round((flushed-indexed)*1000, 3), batch_ms=round((time.monotonic()-started)*1000, 3))
             return cursor

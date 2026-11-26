@@ -13,6 +13,10 @@ from .redundancy import code_version, fingerprint
 from .raw import StorageError
 
 
+class WorkerStorageFailure(StorageError):
+    """已停止的 worker 回報儲存故障，主管仍可處理其他副本的交付。"""
+
+
 class Runtime:
     """正式使用 Docker；本機模式供無 daemon 的短測與故障注入。"""
     def __init__(self, root, config, backend, image, host_root=None):
@@ -57,7 +61,12 @@ class Runtime:
             finally: handle.close()
             self.entries[worker] = dict(pid=child.pid, image=self.image)
         else:
-            await self.start_container(worker)
+            try:
+                await self.start_container(worker)
+            except WorkerStorageFailure:
+                # 主管若在建立容器後崩潰，接管時也要記住已退出的同一副本。
+                atomic_json(self.path, self.entries)
+                raise
         atomic_json(self.path, self.entries)
         LOG.info('event=worker_started worker=%s backend=%s image=%s', worker, self.backend, self.image)
 
@@ -90,9 +99,17 @@ class Runtime:
         labels = info['Config']['Labels']
         if labels.get('collector.group') != self.config['config_hash'] or labels.get('collector.worker') != worker:
             raise ValueError('existing worker identity mismatch')
-        if not info['State']['Running']:
-            await self.api('POST', '/containers/' + name + '/start', allowed=(204, 304))
         self.entries[worker] = dict(name=name, image=self.image)
+        if not self.running(worker, name, info):
+            await self.api('POST', '/containers/' + name + '/start', allowed=(204, 304))
+
+    @staticmethod
+    def running(worker, name, info):
+        # 接管與健康檢查共用退出判定，避免從另一條啟動路徑重啟故障副本。
+        state = info['State']
+        if (not state['Running'] or state.get('Restarting')) and state.get('ExitCode') == 74:
+            raise WorkerStorageFailure(f'worker={worker} container={name} exit_code=74')
+        return state['Running']
 
     async def alive(self, worker):
         # 程序狀態與 IPC 健康分開；活著不代表可安全交接。
@@ -103,9 +120,7 @@ class Runtime:
             info = await self.api('GET', '/containers/' + item['name'] + '/json', allowed=(200, 404))
             if 'Id' not in info: return False
             if info['Image'] != self.image: raise ValueError('worker image mismatch')
-            if not info['State']['Running'] and info['State'].get('ExitCode') == 74:
-                raise StorageError('worker storage failure; inspect disk and retained spool before restarting')
-            return info['State']['Running']
+            return self.running(worker, item['name'], info)
         result = await asyncio.to_thread(subprocess.run, ['ps', '-p', str(item['pid']), '-o', 'command='], capture_output=True, text=True)
         return result.returncode == 0 and '--worker-id ' + worker in result.stdout
 

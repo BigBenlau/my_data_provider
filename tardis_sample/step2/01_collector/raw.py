@@ -9,7 +9,7 @@ from pathlib import Path
 from common import LOG, atomic_json, utc
 from common.protocol import ADAPTERS, classify
 from common.raw_reader import check_count, read_records, read_runs
-from .transport import adapter
+from .transport import adapter, decode_frame
 import gzip
 import queue
 import shutil
@@ -79,7 +79,7 @@ def channel_row(record, run_id):
     error = ''
     try:
         decoded = base64.b64decode(raw, validate=True) if record.get('encoding') == 'base64' else raw
-        obj = 'pong' if decoded in ('pong', b'pong') else json.loads(decoded, parse_float=Decimal)
+        obj = decode_frame(decoded, parse_float=Decimal)
         if kind == 'ws':
             message_type, payload = classify(record, obj)
             if message_type in ('ack', 'error'): message_type = 'control'

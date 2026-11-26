@@ -176,8 +176,17 @@ class SpoolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             spool = Spool(root, dict(DEFAULTS, min_free_gib=.00001, spool_max_bytes=1))
             spool.emit(event())
-            with self.assertRaises(StorageError): spool.close()
+            with self.assertRaisesRegex(StorageError, 'unacknowledged spool exceeds capacity:.*limit_bytes=1'): spool.close()
             self.assertEqual(spool.ack, 0); spool.db.close()
+
+    def test_memory_limit_preserves_last_admitted_sequence(self):
+        # 記憶體額度不足時，未入列的資料不能出現在交付游標或待寫入位元組中。
+        with tempfile.TemporaryDirectory() as root:
+            spool = Spool(root, dict(DEFAULTS, min_free_gib=.00001, memory_queue_bytes=1))
+            with self.assertRaisesRegex(StorageError, 'spool memory byte limit exceeded:.*limit_bytes=1'):
+                spool.emit(event())
+            self.assertEqual((spool.seq, spool.queued_bytes), (0, 0))
+            spool.close(); spool.db.close()
 
 
 class AdapterTests(unittest.TestCase):
@@ -369,6 +378,41 @@ class HandoverTests(unittest.TestCase):
 
 class DockerRuntimeTests(unittest.IsolatedAsyncioTestCase):
     """容器 API 的映像與命令一致性可在沒有 daemon 時先做固定驗證。"""
+    async def test_adopted_stopped_worker_is_not_restarted_after_storage_exit(self):
+        # 容器已建立但主管未登記即崩潰時，重新接管須保留其退出狀態與容器日誌。
+        module = importlib.import_module("01_collector.container_runtime")
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / '_state').mkdir()
+            value = config(); runtime = module.Runtime(root, value, 'docker', 'tag')
+            runtime.image = 'sha256:shared'
+            info = dict(Id='container', Image=runtime.image, State=dict(Running=False, ExitCode=74),
+                        Config=dict(Labels={'collector.group': value['config_hash'], 'collector.worker': 'a'}))
+            runtime.api = AsyncMock(return_value=info)
+            with self.assertRaises(module.WorkerStorageFailure):
+                await runtime.start('a')
+            self.assertEqual(runtime.api.await_count, 1)
+            self.assertEqual(json.loads(runtime.path.read_text())['a']['name'], runtime.prefix + 'a')
+
+    async def test_only_worker_storage_exit_is_isolated(self):
+        # Docker 的 74 只標記該副本，普通崩潰仍可重啟，映像不符仍拒絕接管。
+        module = importlib.import_module("01_collector.container_runtime")
+        with tempfile.TemporaryDirectory() as root:
+            runtime = module.Runtime(root, config(), 'docker', 'tag')
+            runtime.image = 'sha256:shared'
+            runtime.entries['a'] = dict(name='collector-fixture', image=runtime.image)
+            info = dict(Id='container', Image=runtime.image, State=dict(Running=False, ExitCode=74))
+            runtime.api = AsyncMock(return_value=info)
+            with self.assertRaisesRegex(module.WorkerStorageFailure, 'collector-fixture.*74'):
+                await runtime.alive('a')
+            info['State'].update(Running=True, Restarting=True)
+            with self.assertRaises(module.WorkerStorageFailure):
+                await runtime.alive('a')
+            info['State'].update(Running=False, Restarting=False, ExitCode=1)
+            self.assertFalse(await runtime.alive('a'))
+            info['Image'] = 'sha256:other'
+            with self.assertRaises(ValueError):
+                await runtime.alive('a')
+
     async def test_worker_names_and_exchange_labels(self):
         # 五家使用同一映像，容器名稱能區分交易所、資料批次與同批次的多個副本。
         Runtime = importlib.import_module("01_collector.container_runtime").Runtime
@@ -477,6 +521,66 @@ class LocalRuntime:
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     """真正 Unix IPC、收訊與 supervisor 重啟的整合測試。"""
+    async def test_storage_exit_keeps_healthy_peer_ingesting_and_retains_spool(self):
+        # 一路退出 74 時另一路仍透過實際 IPC 交付；正常關停也保留故障副本的證據。
+        module = importlib.import_module("01_collector.supervisor")
+        runner, port = await self.start_fixture()
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                value, feed = self.settings('binance-futures', port)
+                runtime = LocalRuntime(root, value)
+                original_alive = runtime.alive
+                async def alive(worker):
+                    # 故障副本由容器狀態回報，另一條使用真正的 worker 與行情伺服器。
+                    if worker == 'failed':
+                        raise module.WorkerStorageFailure('worker=failed exit_code=74')
+                    return await original_alive(worker)
+                runtime.alive = alive
+                spool = Spool(Path(root) / '_spool' / 'failed', value['redundancy'])
+                spool.emit(event()); spool.close(); spool.db.close()
+                with patch.object(adapter('binance-futures'), 'feeds', return_value=[feed]):
+                    supervisor = module.Supervisor(root, value, runtime)
+                    supervisor.state.update(active=['failed', 'healthy'], last_rotation=0)
+                    await supervisor.serve(.7)
+                    self.assertIsNone(supervisor.fatal)
+                    self.assertGreater(supervisor.store.cursor('healthy'), 0)
+                    self.assertNotIn('failed', runtime.tasks)
+                    self.assertIsNone(supervisor.state['candidate'])
+                    supervisor.store.close(); supervisor.schedule.close()
+                self.assertEqual(json.loads((Path(root) / 'manifest.json').read_text())['status'], 'storage_blocked')
+                report = json.loads((Path(root) / 'status.json').read_text())
+                self.assertEqual(report['storage_blocked_workers'], ['failed'])
+                self.assertEqual(report['data_quality'], 'incomplete')
+                with sqlite3.connect(Path(root) / '_spool' / 'failed' / 'spool.sqlite') as db:
+                    self.assertEqual(db.execute('SELECT count(*) FROM items').fetchone()[0], 1)
+                # 即使容器暫時消失，主管重啟仍記得事故；人工恢復後再驗證交付。
+                resumed = module.Supervisor(root, value, runtime)
+                runtime.alive = AsyncMock(return_value=False)
+                self.assertIsNone(await resumed.worker_alive('failed'))
+                runtime.alive.return_value = True
+                self.assertTrue(await resumed.worker_alive('failed'))
+                self.assertFalse(resumed.storage_holds())
+                resumed.store.close(); resumed.schedule.close()
+        finally:
+            await runner.cleanup()
+
+    async def test_rest_resources_follow_selected_channels(self):
+        # 同一個 worker 入口應按實際訂閱配置 REST，包含 Binance 僅訂閱 WS 的情形。
+        Worker = importlib.import_module("01_collector.worker").Worker
+        for family, market, channels, polls in [('bybit', 'bybit', ['publicTrade'], 0),
+                                               ('binance', 'binance-futures', ['trade'], 0),
+                                               ('binance', 'binance-futures', ['trade', 'openInterest'], 2)]:
+            with tempfile.TemporaryDirectory() as root:
+                value = config(family)
+                value['market_settings'] = {market: dict(symbols=['BTCUSDT'], channels=channels)}
+                worker = Worker(root, value, 'test', 'fixture')
+                worker.stop.set()
+                with patch.object(worker, 'rest_loop', new_callable=AsyncMock) as loop:
+                    await worker.execute()
+                    self.assertEqual(loop.call_count, polls)
+                    self.assertEqual(worker.rest_http is not None, bool(polls))
+                    self.assertTrue(worker.ws_http.closed)
+
     async def websocket(self, request):
         # 用五家不同原生格式回傳資料，第一條連線中斷時其他路仍接收。
         from aiohttp import web

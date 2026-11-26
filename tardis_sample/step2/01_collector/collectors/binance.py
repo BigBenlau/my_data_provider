@@ -8,7 +8,7 @@ import uuid
 import aiohttp
 from common import LOG, ProtocolError
 from common.binance import classify, validate
-from ..transport import (BaseCollector, METADATA,
+from ..transport import (BaseCollector, Budget, METADATA,
                     HTTPFailure, retry_after, reason, key)
 
 
@@ -106,6 +106,12 @@ class Collector(BaseCollector):
     variant_fields = {('binance', 'depth@100ms'): ({'E'}, 'publication_timestamp_variant')}
     validate_event = staticmethod(validate)
 
+    def __init__(self, config, root, writer, http):
+        # 單路採集的 REST 權重按市場計算；雙副本模式使用持久化排程。
+        super().__init__(config, root, writer, http)
+        self.budgets = {m: Budget(config['rest_weight_per_minute'].get(m, 1200)) for m in config['markets']}
+        self.rest_slots = asyncio.Semaphore(6)
+
     @staticmethod
     def legacy_symbols(config, market):
         # 舊版單組設定以頂層清單指定現貨及期貨商品。
@@ -150,6 +156,10 @@ class Collector(BaseCollector):
     @staticmethod
     def configure(config, market):
         # 用本地來源 JSON 驗證 Binance 必要 channel 與頻率，保存來源雜湊供追溯。
+        if not config.get('managed'):
+            for name in ('snapshot_interval', 'oi_interval', 'rest_timeout'):
+                if config[name] <= 0:
+                    raise ValueError(f'{name} must be positive')
         if not config.get('managed') and not set(config['symbols']) <= set(SYMBOLS): raise ValueError('Binance supports BTCUSDT/ETHUSDT/SOLUSDT/GRTUSDT')
         path = METADATA / (market + '.json'); data = json.loads(path.read_text())
         details = {c['name']: c for c in data['channelDetails']}

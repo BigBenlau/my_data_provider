@@ -1,6 +1,7 @@
 """所有交易所與 A/B/C 共用的 worker：原生收訊、暫存、ACK 交付。"""
 import asyncio
 import base64
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import time
 import uuid
 import aiohttp
 from common import LOG
-from .transport import adapter, key, proxy_url, reason, retry_after
+from .transport import adapter, decode_frame, key, proxy_url, reason, retry_after
 from .delivery import Spool, read_packet, write_packet
 from .redundancy import feed_groups, identity, local_paths, source_inventory
 from .replica_protocol import subscription, classify_group, atoms
@@ -131,8 +132,10 @@ class Worker:
         # 原文只存一次；解析失敗及非行情訊息交給狀態日誌。
         if msg.type not in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY): return 0
         received = time.time_ns() // 1000; binary = isinstance(msg.data, bytes)
-        if msg.data in ('pong', b'pong'): self.control(group); return 0
-        obj = json.loads(msg.data)
+        if msg.data in adapter(group['feeds'][0]['exchange']).text_heartbeat_replies:
+            self.control(group)
+            return 0
+        obj = decode_frame(msg.data)
         kind, matching = classify_group(group, obj)
         if kind == 'error': raise ValueError(str(obj))
         if kind == 'ack':
@@ -224,6 +227,7 @@ class Worker:
         return dict(worker=self.worker_id, pid=os.getpid(), started=self.started, updated=time.time(), identity=self.identity,
                     draining=self.draining, feeds=self.stats, enqueued=self.spool.seq, written=self.spool.written,
                     ack=self.spool.ack, pending_bytes=self.spool.bytes, memory_bytes=self.spool.queued_bytes,
+                    spool_capacity_waits=self.spool.capacity_waits,
                     oldest_pending_s=max(0, time.time() - self.spool.oldest_us / 1e6) if self.spool.oldest_us else 0,
                     ack_ms=self.ack_ms)
 
@@ -270,10 +274,10 @@ class Worker:
     async def send_connected(self, reader, writer):
         # 先送狀態再送資料；ACK 只能由正式持久化進度推進。
         while True:
-            batch = await asyncio.to_thread(self.spool.pending)
-            if not batch:
+            packet = await asyncio.to_thread(self.spool.pending_packet)
+            if not packet:
                 await asyncio.sleep(.1); continue
-            await write_packet(writer, dict(type='batch', batch=batch))
+            await write_packet(writer, packet)
             started = time.monotonic()
             response = await asyncio.wait_for(read_packet(reader), 60)
             if response.get('error'): raise ValueError(response['error'])
@@ -289,9 +293,11 @@ class Worker:
     async def execute(self):
         # WS 與 REST 分開連線池，避免長連線佔滿 REST 的連線名額。
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0), timeout=timeout) as ws_http:
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10), timeout=timeout) as rest_http:
-                self.ws_http = ws_http; self.rest_http = rest_http
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0), timeout=timeout) as self.ws_http:
+            # 純 WebSocket 訂閱只需要行情連線池。
+            rest = (aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10), timeout=timeout)
+                    if self.schedule.has_rest_jobs else nullcontext())
+            async with rest as self.rest_http:
                 await self.lifecycle()
 
     async def lifecycle(self):
@@ -299,7 +305,8 @@ class Worker:
         sender = asyncio.create_task(self.sender()); watcher = asyncio.create_task(self.watchdog())
         control = asyncio.create_task(self.control_sender())
         captures = [asyncio.create_task(self.stream(group)) for group in self.groups]
-        captures += [asyncio.create_task(self.rest_loop()) for _ in range(2)]
+        if self.rest_http is not None:
+            captures.extend(asyncio.create_task(self.rest_loop()) for _ in range(2))
         stop = asyncio.create_task(self.stop.wait())
         try:
             done, _ = await asyncio.wait([sender, watcher, control, stop, *captures], return_when=asyncio.FIRST_COMPLETED)
@@ -321,7 +328,8 @@ class Worker:
                 await asyncio.sleep(.1)
         finally:
             sender.cancel(); await asyncio.gather(sender, return_exceptions=True)
-            self.schedule.close(); self.spool.db.close()
+            self.schedule.close()
+            await asyncio.to_thread(self.spool.close_database)
 
 
 async def run_worker(root, worker_id, image):

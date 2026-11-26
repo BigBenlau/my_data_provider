@@ -625,6 +625,32 @@ class OriginalChannelTests(unittest.TestCase):
 
 class ModularTests(unittest.TestCase):
     """ModularTests 測試組：集中驗證對應模組的行為與失敗邊界。"""
+    def test_websocket_markets_can_run_without_binance_rest_settings(self):
+        # 純 WS 市場的舊入口能使用精簡設定，預設商品取自各自的交易所。
+        with tempfile.TemporaryDirectory() as directory:
+            settings = json.loads((transport.COLLECTOR_ROOT / 'settings.json').read_text())
+            for name in ('rest_weight_per_minute', 'rest_timeout', 'snapshot_interval', 'oi_interval'):
+                settings.pop(name)
+            path = Path(directory) / 'settings.json'
+            path.write_text(json.dumps(settings))
+            for market in ('bybit', 'bybit-spot', 'okex', 'okex-swap', 'coinbase', 'upbit'):
+                config = configuration(path, markets=[market])
+                collector = transport.adapter(market)(config, Path(directory), None, None)
+                self.assertEqual(config['symbols'], collector.default_symbols(market))
+                self.assertTrue(feeds(config))
+
+    def test_replay_plain_heartbeat_text_and_binary(self):
+        # 歷史原文包含純文字、二進位和無效 JSON；匯出保留原有分類與原文。
+        for market, channel, symbol, expected in [('okex', 'books', 'BTC-USDT', 'control'),
+                                                   ('bybit', 'publicTrade', 'BTCUSDT', 'unexpected')]:
+            for encoding, raw in [('utf8', 'pong'), ('base64', 'cG9uZw==')]:
+                record = dict(kind='ws', exchange=market, symbol=symbol, channel=channel,
+                              encoding=encoding, raw=raw)
+                row = channel_row(record, 'test')
+                self.assertEqual((row['capture_type'], row['raw_message']), (expected, raw))
+            invalid = channel_row(dict(record, encoding='utf8', raw='broken'), 'test')
+            self.assertEqual(invalid['capture_error'], 'invalid_json_or_encoding')
+
     def test_market_adapters_and_protocol_boundaries(self):
         # 每個市場使用自己的訂閱與錯誤格式，不混用不相容商品代碼。
         from common.protocol import ADAPTERS

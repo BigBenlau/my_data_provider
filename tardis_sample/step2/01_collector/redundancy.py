@@ -1,6 +1,7 @@
 """雙副本共用設定、版本識別與分組；所有角色使用同一程式及映像。"""
 import hashlib
 import json
+from threading import TIMEOUT_MAX
 from pathlib import Path
 from collections import defaultdict
 from common import STEP2_ROOT
@@ -68,6 +69,9 @@ def group_config(family, path=None):
             raise ValueError(f'redundancy.{name} must be positive')
     if not isinstance(result['redundancy']['compress_raw'], bool): raise ValueError('compress_raw must be boolean')
     if type(result['redundancy']['group_size']) is not int: raise ValueError('group_size must be a positive integer')
+    wait = result['redundancy'].get('spool_capacity_wait_seconds', 10)
+    if type(wait) not in (int, float) or not 0 <= wait <= TIMEOUT_MAX:
+        raise ValueError('spool_capacity_wait_seconds must be a nonnegative supported timeout')
     if result['redundancy']['verify_seconds'] < 10 or result['redundancy']['match_events'] < 3:
         raise ValueError('handover requires at least 10 seconds and three common events')
     result['symbols'] = sorted({s for m in markets.values() for s in m['symbols']})

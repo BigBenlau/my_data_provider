@@ -26,6 +26,11 @@ class Collector(BaseCollector):
         return 10 if market == 'bybit-spot' else 100
     application_heartbeat = '{"op":"ping"}'
     @staticmethod
+    def default_symbols(market):
+        # 現貨與線性永續的預設訂閱都使用 Bybit 的 USDT 商品代碼。
+        return ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+
+    @staticmethod
     def channels(market):
         # 列出該市場的原生來源；現貨與衍生品清單明確分開。
         return ['publicTrade', 'orderbook.50', 'orderbook.1', 'tickers'] + (['allLiquidation'] if market == 'bybit' else [])

@@ -15,6 +15,7 @@ class Monitor:
         self.groups = {g['id']: g for g in feed_groups(config)}
         self.reported = {}; self.latest = {}; self.cooldowns = {}
         self.coverage = {}; self.proofs = {}
+        self.delivery_samples = {}
         self.current = {w: json.loads(s) for w, s in self.db.execute('SELECT worker,status FROM worker_state')}
         self.blockers = {key(f): 'no_reliable_native_identity' for f in self.feeds
                          if f['channel'] not in adapter(f['exchange']).replica_strong_channels}
@@ -31,6 +32,7 @@ class Monitor:
     def forget(self, worker):
         # 已排空退役的 worker 不再保留大型健康快照；歷史交付游標仍保存。
         self.current.pop(worker, None)
+        self.delivery_samples.pop(worker, None)
         with self.db:
             self.db.execute('DELETE FROM worker_state WHERE worker=?', (worker,))
             self.db.execute('DELETE FROM markers WHERE worker=?', (worker,))
@@ -175,6 +177,29 @@ class Monitor:
                     return True
         return False
 
+    def delivery_rate(self, worker, state, now):
+        # 比較同一程序的兩份新鮮回報；重啟、倒退或過期樣本都不推算速率。
+        fields = ('started', 'updated', 'enqueued', 'ack', 'pending_bytes')
+        if any(state.get(field) is None for field in fields):
+            return {}
+        previous = self.delivery_samples.get(worker)
+        sample = {field: state[field] for field in fields}
+        self.delivery_samples[worker] = sample
+        if not previous or sample['started'] != previous['started']:
+            return {}
+        elapsed = sample['updated'] - previous['updated']
+        max_interval = max(2 * self.options['heartbeat_seconds'], self.options['worker_timeout'])
+        if not 0 < elapsed <= max_interval or not 0 <= now - sample['updated'] <= self.options['worker_timeout']:
+            return {}
+        received = sample['enqueued'] - previous['enqueued']
+        acked = sample['ack'] - previous['ack']
+        if received < 0 or acked < 0:
+            return {}
+        growth = (sample['pending_bytes'] - previous['pending_bytes']) / elapsed
+        remaining = max(0, self.options['spool_max_bytes'] - sample['pending_bytes'])
+        return dict(enqueued_per_s=round(received / elapsed, 1), ack_per_s=round(acked / elapsed, 1),
+                    pending_bytes_per_s=round(growth, 1), seconds_to_limit=round(remaining / growth, 1) if growth > 0 else None)
+
     def health(self, workers, active=None):
         # 每五秒彙總程序外的傳輸、收訊、交付及落盤狀態，明示不可證明完整。
         states = self.states(); repairs, quiet = self.repairs(workers, states)
@@ -189,11 +214,14 @@ class Monitor:
                                 [(w, json.dumps(s), s['updated']) for w, s in states.items()])
         gaps = self.resolve_gaps(); written = self.db.execute('SELECT written FROM output').fetchone()[0]
         uncertain = dict(self.db.execute('SELECT name,value FROM totals')).get('identity_unverified', 0)
+        rates = {}
         for worker in workers:
             s = states.get(worker, {})
-            if s.get('oldest_pending_s', 0) > 10:
-                LOG.warning('event=delivery_backlog worker=%s oldest_pending_s=%.3f pending_bytes=%s action=inspect_commit_capacity',
-                            worker, s['oldest_pending_s'], s.get('pending_bytes'))
+            rates[worker] = self.delivery_rate(worker, s, time.time())
+            used = s.get('pending_bytes', 0); limit = self.options['spool_max_bytes']
+            if s.get('oldest_pending_s', 0) > 10 or used >= .8 * limit:
+                LOG.warning('event=delivery_backlog worker=%s oldest_pending_s=%.3f pending_bytes=%s limit_bytes=%s used_pct=%.2f trend=%s action=inspect_commit_capacity',
+                            worker, s.get('oldest_pending_s', 0), used, limit, 100 * used / limit, json.dumps(rates[worker]))
             LOG.info('event=worker_health worker=%s ipc_age_s=%.1f feeds_receiving=%s enqueued=%s durable=%s ack=%s pending_bytes=%s jsonl_seq=%s oldest_pending_s=%.3f ack_ms=%.3f memory_bytes=%s',
                      worker, time.time() - s.get('updated', time.time()),
                      sum(bool(f.get('last_data_us')) for f in s.get('feeds', {}).values()),
@@ -202,7 +230,7 @@ class Monitor:
         self.latest = dict(updated_us=time.time_ns() // 1000, workers=states, raw_records=written,
                            silent_or_unverified=quiet, uncovered_gaps=gaps, identity_unverified_events=uncertain,
                            data_quality='observed_not_proven_complete', rotation_blockers=self.blockers,
-                           batch_metrics=self.store.metrics, ws_coverage=self.coverage)
+                           batch_metrics=self.store.metrics, ws_coverage=self.coverage, delivery_rates=rates)
         LOG.info('event=commit_health metrics=%s', json.dumps(self.store.metrics))
         LOG.info('event=supervisor_health jsonl_seq=%s silent_sources=%s uncovered_gaps=%s ambiguity_preserved=%s', written, len(quiet), len(gaps), uncertain)
         return repairs, gaps
@@ -211,7 +239,7 @@ class Monitor:
         # 歷史缺口不會被新快照補回；每個缺口只要求一次重新初始化。
         return self.db.execute('SELECT rowid,feed FROM gaps WHERE resolved=2 AND rowid NOT IN (SELECT gap FROM snapshot_requests)').fetchall()
 
-    def stopped(self):
+    def stopped(self, storage_blocked=()):
         # 停止收訊不再標為即時靜默；必要來源缺失仍留在最終品質報告。
         observed = self.store.observed_feeds()
         inventory = source_inventory(self.config)
@@ -221,8 +249,12 @@ class Monitor:
         self.latest.update(status='stopped', workers={}, silent_or_unverified=[], observed_sources=sorted(observed),
                            missing_required_sources=required, silent_optional_sources=optional)
         if required: self.latest['data_quality'] = 'incomplete'
-        LOG.info('event=capture_stopped raw_records=%s missing_required=%s silent_optional=%s',
-                 self.latest['raw_records'], len(required), len(optional))
+        if storage_blocked:
+            self.latest.update(status='storage_blocked', data_quality='incomplete')
+            LOG.error('event=capture_stopped_with_pending_spool workers=%s raw_records=%s', storage_blocked, self.latest['raw_records'])
+        else:
+            LOG.info('event=capture_stopped raw_records=%s missing_required=%s silent_optional=%s',
+                     self.latest['raw_records'], len(required), len(optional))
         return self.latest
 
     def snapshot_requested(self, gap):

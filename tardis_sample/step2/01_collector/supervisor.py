@@ -12,9 +12,10 @@ from .delivery import MergeStore, database, read_packet, write_packet
 from .redundancy import group_config, identity, local_paths
 from .replica_monitor import Monitor
 from .rest_schedule import Schedule
-from .container_runtime import Runtime
+from .container_runtime import Runtime, WorkerStorageFailure
 from .transport import adapter
 from .retention import compress_ready
+from .raw import StorageError
 
 
 class Supervisor:
@@ -27,11 +28,12 @@ class Supervisor:
         manifest_path = self.root / 'manifest.json'
         if manifest_path.exists() and json.loads(manifest_path.read_text()).get('identity') != self.expected:
             raise ValueError('existing run version/config/image mismatch; use new output')
-        self.store = MergeStore(root, config); self.monitor = Monitor(self.store, config)
+        self.store = MergeStore(root, config, background_notices=True); self.monitor = Monitor(self.store, config)
         self.schedule = Schedule(self.paths['control'] / 'schedule.sqlite', config)
         self.stop = asyncio.Event(); self.repair = {}; self.clients = set(); self.connections = set()
         self.fatal = None; self.last_health = 0; self.compression = None; self.last_compression = 0
         self.capacity_state = None; self.last_archive = 0
+        self.recovery_dbs = {}
         self.state_path = self.paths['control'] / 'supervisor.json'
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {
             'active': [], 'candidate': None, 'retiring': None, 'last_rotation': time.time(), 'next_index': 0}
@@ -63,8 +65,62 @@ class Supervisor:
         return sorted(set(ids))
 
     async def locked(self, function, *args):
-        # SQLite 合併寫入序列化，但 fsync 放入背景執行緒，不阻塞 IPC 收訊。
-        async with self.lock: return await asyncio.to_thread(function, *args)
+        # 協程取消不能中斷背景 SQLite 交易，等交易結束才釋放鎖給下一條交付連線。
+        async with self.lock:
+            operation = asyncio.create_task(asyncio.to_thread(function, *args))
+            cancelled = False
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    cancelled = True
+            result = operation.result()
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
+    def storage_holds(self):
+        # 故障副本保留原身分及 spool，程序恢復後仍留有事故記錄。
+        return {w for w, item in self.state.get('storage_incidents', {}).items() if 'resumed_us' not in item}
+
+    def hold_storage(self, worker, exc):
+        # 先登記事故，避免主管重啟或容器暫時消失時丟失隔離狀態。
+        if worker not in self.storage_holds():
+            incidents = self.state.setdefault('storage_incidents', {})
+            incidents[worker] = dict(detected_us=time.time_ns() // 1000, reason=str(exc))
+            self.save()
+            LOG.error('event=worker_storage_blocked worker=%s reason=%s action=retain_container_and_spool', worker, exc)
+
+    async def start_worker(self, worker):
+        # 從現有容器接管時也可能首次發現其儲存故障。
+        try:
+            await self.runtime.start(worker)
+        except WorkerStorageFailure as exc:
+            self.hold_storage(worker, exc)
+
+    async def worker_alive(self, worker):
+        # 僅隔離明確的副本儲存退出；主管自身落盤、映像與設定錯誤仍須報錯。
+        try:
+            alive = await self.runtime.alive(worker)
+        except WorkerStorageFailure as exc:
+            self.hold_storage(worker, exc)
+            return None
+        if worker in self.storage_holds():
+            if not alive:
+                return None
+            self.state['storage_incidents'][worker]['resumed_us'] = time.time_ns() // 1000
+            self.save()
+            LOG.warning('event=worker_storage_resumed worker=%s action=verify_delivery_cursor', worker)
+        return alive
+
+    def storage_report(self, report):
+        # 來源缺失的品質判定優先；曾發生的儲存事故要留待核對。
+        incidents = self.state.get('storage_incidents', {})
+        if incidents:
+            report.update(storage_incidents=incidents, storage_blocked_workers=sorted(self.storage_holds()))
+            if report.get('data_quality') != 'incomplete':
+                report['data_quality'] = 'coverage_unverified_after_storage_failure'
+        return report
 
     async def accept(self, reader, writer):
         # 身分不合格不接受資料；只有目前管理的 worker 可連入。
@@ -74,7 +130,7 @@ class Supervisor:
             role = hello.get('role', 'data'); connection = (worker, role)
             if hello.get('type') != 'hello' or worker not in self.workers() or hello.get('identity') != self.expected:
                 await write_packet(writer, {'error': 'worker version/config/image rejected'}); return
-            if role not in ('data', 'control') or connection in self.connections or not await self.runtime.alive(worker):
+            if role not in ('data', 'control') or connection in self.connections or not await self.worker_alive(worker):
                 await write_packet(writer, {'error': 'worker process unavailable or duplicate connection', 'retry': True}); return
             self.connections.add(connection); registered = True; await write_packet(writer, {'accepted': True})
             while True:
@@ -101,16 +157,21 @@ class Supervisor:
         # 崩潰的 worker 先用相同身分恢復 spool；不刪除未 ACK 暫存。
         while len(self.state['active']) < 2:
             worker = uuid.uuid4().hex[:12]; self.state['active'].append(worker); self.save()
-        for worker in self.state['active']:
-            if not await self.runtime.alive(worker): await self.runtime.start(worker)
+        workers = list(self.state['active'])
         candidate = self.state['candidate']
-        if candidate and not await self.runtime.alive(candidate['worker']):
-            await self.runtime.start(candidate['worker'])
+        if candidate:
+            workers.append(candidate['worker'])
+        for worker in workers:
+            # False 表示可正常重啟；None 表示磁碟待查，保留原容器。
+            if await self.worker_alive(worker) is False:
+                await self.start_worker(worker)
 
     async def rotation(self):
         # 延期不追趕；候選失敗亦等待下一個週期，避免重連耗盡配額。
         if self.state['retiring']:
             await self.finish_retiring(); return
+        if self.storage_holds():
+            return
         candidate = self.state['candidate']; now = time.time()
         if candidate:
             valid, reasons = await self.locked(self.monitor.verify, candidate['worker'], self.state['active'], candidate['since'])
@@ -128,7 +189,7 @@ class Supervisor:
             self.state['last_rotation'] = now; self.save(); return
         worker = uuid.uuid4().hex[:12]
         self.state['candidate'] = dict(worker=worker, since=now); self.save()
-        await self.runtime.start(worker)
+        await self.start_worker(worker)
 
     def retire(self, worker, reason):
         # 指令只要求停止收訊，worker 必須先排空交付才自行退出。
@@ -140,8 +201,12 @@ class Supervisor:
         # 不以期限強殺尚未交付資料；逾時持續告警並暫停下一次換代。
         item = self.state['retiring']; worker = item['worker']
         (self.paths['control'] / (worker + '.drain')).touch()
-        if not await self.runtime.alive(worker):
-            await self.locked(self.recover_spool, worker)
+        alive = await self.worker_alive(worker)
+        if alive is None:
+            return
+        if not alive:
+            if not await self.locked(self.recover_spool_batch, worker):
+                return
             await self.runtime.stop(worker)
             await self.locked(self.monitor.forget, worker)
             self.state['retiring'] = None; self.state['last_rotation'] = time.time(); self.save()
@@ -149,21 +214,35 @@ class Supervisor:
         elif time.time() - item['since'] > self.options['drain_timeout']:
             LOG.warning('event=worker_drain_pending worker=%s action=retain_spool_and_pause_rotation', worker)
 
-    def recover_spool(self, worker):
-        # 僅接管已退出程序的待交付資料；正式提交成功後才移除該副本暫存。
+    def recover_spool_batch(self, worker):
+        # 每輪限一批，讓活躍副本在兩批之間取得提交鎖，且讓主管繼續心跳。
         root = self.paths['spool'] / worker; path = root / 'spool.sqlite'
-        if not path.exists(): return
-        db = database(path)
-        try:
-            while True:
-                rows = db.execute('SELECT seq,payload FROM items ORDER BY seq LIMIT 512').fetchall()
-                if not rows: break
-                ack = self.store.ingest(worker, [{'seq': n, 'record': json.loads(p)} for n, p in rows])
-                with db:
-                    db.execute('DELETE FROM items WHERE seq<=?', (ack,)); db.execute('UPDATE state SET ack=?', (ack,))
-            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        finally: db.close()
+        if not path.exists(): return True
+        if worker not in self.recovery_dbs:
+            self.recovery_dbs[worker] = database(path)
+        db = self.recovery_dbs[worker]
+        written, ack = db.execute('SELECT seq,ack FROM state WHERE id=1').fetchone()
+        committed = self.store.cursor(worker)
+        if not ack <= committed <= written:
+            raise StorageError(f'inconsistent retiring spool: worker={worker} ack={ack} committed={committed} durable={written}')
+        batch = []; size = 0
+        for seq, raw in db.execute('SELECT seq,cast(payload AS BLOB) FROM items ORDER BY seq LIMIT 512'):
+            if seq > written:
+                raise StorageError(f'retiring spool exceeds durable cursor: worker={worker} seq={seq}')
+            if batch and size + len(raw) > self.options['batch_max_bytes']:
+                break
+            batch.append(dict(seq=seq, record=json.loads(raw))); size += len(raw)
+        if batch:
+            ack = self.store.ingest(worker, batch)
+            with db:
+                db.execute('DELETE FROM items WHERE seq<=?', (ack,))
+                db.execute('UPDATE state SET ack=? WHERE id=1', (ack,))
+            return False
+        if committed != written:
+            raise StorageError(f'incomplete retiring spool: worker={worker} committed={committed} durable={written}')
+        self.recovery_dbs.pop(worker).close()
         shutil.rmtree(root)
+        return True
 
     async def maintain_raw(self, now):
         # 壓縮在獨立執行緒讀封段，慢磁碟不會佔住交付鎖；失敗保留原文重試。
@@ -195,8 +274,11 @@ class Supervisor:
             for gap, feed in await self.locked(self.monitor.snapshot_requests):
                 market, symbol, _ = feed.split('/'); await self.schedule.call('request_snapshot', market, symbol)
                 await self.locked(self.monitor.snapshot_requested, gap)
-            report = dict(self.monitor.latest, containers={w: await self.runtime.alive(w) for w in self.workers()})
-            atomic_json(self.root / 'status.json', report)
+            report = dict(self.monitor.latest, containers={w: bool(await self.worker_alive(w)) for w in self.workers()})
+            if self.storage_holds():
+                self.repair.clear()
+                LOG.warning('event=worker_storage_hold workers=%s action=inspect_worker_logs', sorted(self.storage_holds()))
+            atomic_json(self.root / 'status.json', self.storage_report(report))
             sealed = await self.locked(self.store.sealed_cursor)
             LOG.info('event=output_health jsonl_seq=%s sealed_seq=%s csv_mode=on_demand', report['raw_records'], sealed)
 
@@ -214,6 +296,17 @@ class Supervisor:
                             row['market'], row['channel'], row['symbols'], requested, row['interval'], row['capacity'])
             else: LOG.info('event=rest_capacity market=%s channel=%s interval_s=%s symbols=%s', row['market'], row['channel'], row['interval'], row['symbols'])
 
+    async def publish_notices(self, stopped):
+        # 通知已隨行情交易落盤；慢速輸出在提交鎖外執行，讓其他批次先取得 ACK。
+        while not stopped.is_set():
+            rows = await self.locked(self.store.pending_notices)
+            if rows:
+                await asyncio.to_thread(self.store.print_notices, rows)
+                await self.locked(self.store.confirm_notices, rows[-1][0])
+            else:
+                try: await asyncio.wait_for(stopped.wait(), .5)
+                except asyncio.TimeoutError: pass
+
     async def serve(self, duration=None):
         # 重啟 supervisor 只重建 socket；既有 worker 自動重送與追趕。
         self.paths['socket'].unlink(missing_ok=True)
@@ -221,8 +314,11 @@ class Supervisor:
         started = time.monotonic()
         if self.monitor.blockers:
             LOG.warning('event=rotation_preflight policy=strict blocked=%s action=retain_workers', json.dumps(self.monitor.blockers))
+        notice_stop = asyncio.Event()
+        publisher = asyncio.create_task(self.publish_notices(notice_stop))
         try:
             while not self.stop.is_set():
+                if publisher.done(): publisher.result()
                 await self.start_missing(); await self.background(); await self.rotation()
                 if duration and time.monotonic() - started >= duration: break
                 try: await asyncio.wait_for(self.stop.wait(), .5)
@@ -236,6 +332,11 @@ class Supervisor:
             await asyncio.gather(*clients, return_exceptions=True)
             await server.wait_closed()
             if self.compression: await asyncio.gather(self.compression, return_exceptions=True)
+            for db in self.recovery_dbs.values():
+                await asyncio.to_thread(db.close)
+            self.recovery_dbs.clear()
+            notice_stop.set()
+            await publisher
 
     async def shutdown(self):
         # 使用者正常停止時排空所有副本；程序崩潰不會走此路徑。
@@ -243,16 +344,24 @@ class Supervisor:
         for worker in workers: (self.paths['control'] / (worker + '.drain')).touch()
         deadline = time.monotonic() + self.options['drain_timeout'] + 5
         last_report = 0
-        while any([await self.runtime.alive(w) for w in workers]) and time.monotonic() < deadline:
+        while any([await self.worker_alive(w) for w in workers]) and time.monotonic() < deadline:
             if time.monotonic() - last_report >= self.options['heartbeat_seconds']:
                 await self.locked(self.monitor.health, workers, self.state['active']); last_report = time.monotonic()
                 LOG.info('event=shutdown_progress phase=draining_workers')
             await asyncio.sleep(.2)
         for worker in workers:
+            if await self.worker_alive(worker) is None:
+                continue
             await self.runtime.stop(worker)
-            await self.locked(self.recover_spool, worker)
+            while not await self.locked(self.recover_spool_batch, worker):
+                await asyncio.sleep(0)
             await self.locked(self.monitor.forget, worker)
-        self.state.update(active=[], candidate=None, retiring=None, last_rotation=time.time()); self.save()
+        held = self.storage_holds()
+        self.state['active'] = [w for w in self.state['active'] if w in held]
+        for role in ('candidate', 'retiring'):
+            if self.state[role] and self.state[role]['worker'] not in held:
+                self.state[role] = None
+        self.state['last_rotation'] = time.time(); self.save()
         await self.locked(self.store.seal)
         if self.compression:
             await asyncio.gather(self.compression, return_exceptions=True)
@@ -261,9 +370,10 @@ class Supervisor:
             while await asyncio.to_thread(compress_ready, self.root):
                 pass
         await self.locked(self.monitor.health, [])
-        await self.locked(self.monitor.stopped)
+        await self.locked(self.monitor.stopped, sorted(held))
+        self.storage_report(self.monitor.latest)
         atomic_json(self.root / 'status.json', self.monitor.latest)
-        self.manifest.update(status='stopped', ended_us=time.time_ns() // 1000,
+        self.manifest.update(status=self.monitor.latest['status'], ended_us=time.time_ns() // 1000,
                              raw_records=self.monitor.latest['raw_records'], health_at_stop=self.monitor.latest)
         atomic_json(self.root / 'manifest.json', self.manifest)
 
@@ -285,7 +395,7 @@ async def run_supervisor(args):
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM): loop.add_signal_handler(sig, supervisor.stop.set)
         await supervisor.serve(args.duration)
-        return 0
+        return 74 if supervisor.storage_holds() else 0
     finally:
         try:
             if supervisor: supervisor.schedule.close(); supervisor.store.close()

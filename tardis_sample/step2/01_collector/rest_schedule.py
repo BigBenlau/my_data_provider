@@ -28,6 +28,8 @@ class Schedule:
         CREATE TABLE IF NOT EXISTS progress(id TEXT PRIMARY KEY,last_success REAL);
         ''')
         self.initialize()
+        # 同一批次的訂閱固定，只有已登記 REST 任務時才需要 worker 領取租約。
+        self.has_rest_jobs = self.db.execute('SELECT 1 FROM jobs LIMIT 1').fetchone() is not None
 
     async def call(self, method, *args, **kwargs):
         # 跨程序鎖競爭與磁碟同步不得阻塞行情收訊；同一連線仍序列化。

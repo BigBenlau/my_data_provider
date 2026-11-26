@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -30,6 +31,20 @@ class RepairTests(unittest.TestCase):
     """整組收訊與新 session 寬限期避免冷門商品造成連鎖重連。"""
     setUp = fixtures.MergeTests.setUp
     tearDown = fixtures.MergeTests.tearDown
+
+    def test_backlog_trend_does_not_mix_stale_samples_or_worker_restarts(self):
+        # 預估時間僅適用於同一程序的正成長區間，積壓下降時仍顯示負成長率。
+        monitor = self.monitor()
+        limit = monitor.options['spool_max_bytes']
+        sample = dict(started=1, updated=100, enqueued=100, ack=90, pending_bytes=limit-1000)
+        self.assertEqual(monitor.delivery_rate('a', sample, 100), {})
+        sample.update(updated=102, enqueued=140, ack=110, pending_bytes=limit-800)
+        self.assertEqual(monitor.delivery_rate('a', sample, 102),
+                         dict(enqueued_per_s=20, ack_per_s=10, pending_bytes_per_s=100, seconds_to_limit=8))
+        sample.update(updated=104, ack=140, pending_bytes=limit-1200)
+        self.assertIsNone(monitor.delivery_rate('a', sample, 104)['seconds_to_limit'])
+        self.assertEqual(monitor.delivery_rate('a', dict(sample, started=105, updated=106), 106), {})
+        self.assertEqual(monitor.delivery_rate('a', dict(sample, started=105, updated=107), 999), {})
 
     def monitor(self):
         # 同條連線包含活躍 SOL 與靜默 GRT，模擬實際修復風暴的條件。
@@ -96,6 +111,20 @@ class RepairTests(unittest.TestCase):
         Worker.application_control(target,dict(feeds=[feed]),dict(type='heartbeat',product_id='BTC-USD',last_trade_id=50,sequence=80))
         self.assertEqual(target.stats[key(feed)]['received'],0)
         self.assertEqual(target.stats[key(feed)]['heartbeat_trade_id'],50)
+
+    def test_only_okx_credits_a_plain_pong(self):
+        # 同一純文字回覆只能更新對應協議的傳輸健康，兩個市場的行情計數皆維持零。
+        for family in ('okx', 'bybit'):
+            group = fixtures.feed_groups(config(family))[0]
+            feed = group['feeds'][0]
+            worker = Worker.__new__(Worker)
+            worker.stats = {key(feed): {'received': 0}}
+            for kind, data in ((worker_module.aiohttp.WSMsgType.TEXT, 'pong'),
+                               (worker_module.aiohttp.WSMsgType.BINARY, b'pong')):
+                message = SimpleNamespace(type=kind, data=data)
+                self.assertEqual(worker.message(message, group, 'test', 'session'), 0)
+                self.assertEqual('last_control_us' in worker.stats[key(feed)], family == 'okx')
+                self.assertEqual(worker.stats[key(feed)]['received'], 0)
 
     def test_retired_worker_health_is_removed(self):
         # 長期換代不累積完整舊健康快照或舊連線標記，合併序號仍保留。
@@ -283,8 +312,143 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(monitor.coverage_state(feed, peers, states, now)['paths'], 1)
 
 
+class OfflineRecoveryTests(unittest.TestCase):
+    """以同版主管的提交游標重播凍結副本，原始證據須完整保留。"""
+    def frozen_batch(self, root):
+        # 模擬 A 已提交首筆但未收到 ACK，B 另有一份重複行情及一筆新行情。
+        image = 'sha256:fixture'
+        value = config()
+        store = fixtures.MergeStore(root, value)
+        events = [event(number=n) for n in (1, 2, 3)]
+        send(store, 'a', events[:1]); store.close()
+        fixtures.atomic_json(root / 'manifest.json', dict(config=value, identity=fixtures.identity(value, image)))
+        fixtures.atomic_json(root / '_state/config.json', value)
+        fixtures.atomic_json(root / '_state/supervisor.json', dict(active=['a', 'b'], candidate=None, retiring=None))
+        (root / '.collector.lock').touch()
+        for worker, records in [('a', events[:2]), ('b', events[1:])]:
+            spool = Spool(root / '_spool' / worker, value['redundancy'])
+            for record in records:
+                spool.emit(record)
+            spool.close(); spool.db.close()
+        return image
+
+    def test_copy_recovery_matches_cursors_and_preserves_evidence(self):
+        # 離線補交可重試；同一行情只落盤一次，來源的 spool 與既有 JSONL 保留。
+        module = importlib.import_module('01_collector.ops.recover_spool_copy')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'snapshot'; target = Path(directory) / 'recovered'
+            image = self.frozen_batch(source)
+            stamp = module.snapshot_stamp(source)
+            report = module.recover_copy(source, target, image)
+            self.assertEqual(report['raw_records'], 3)
+            self.assertEqual([v['committed'] for v in report['workers'].values()], [2, 2])
+            self.assertEqual(module.recover_copy(source, target, image)['raw_records'], 3)
+            self.assertEqual(len(list(read_records(source))), 1)
+            self.assertEqual(len(list(read_records(target))), 3)
+            self.assertEqual(stamp, module.snapshot_stamp(source))
+            with self.assertRaisesRegex(ValueError, 'overlap'):
+                module.recover_copy(source, source, image)
+            with self.assertRaisesRegex(ValueError, 'must match'):
+                module.recover_copy(source, target, 'sha256:different')
+
+    def test_offline_recovery_rejects_incomplete_spool(self):
+        # 宣告已持久化的尾端若不存在，停止並保留副本，避免產出成功報告。
+        module = importlib.import_module('01_collector.ops.recover_spool_copy')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'snapshot'; target = Path(directory) / 'recovered'
+            image = self.frozen_batch(source)
+            with sqlite3.connect(source / '_spool/b/spool.sqlite') as db:
+                db.execute('DELETE FROM items WHERE seq=2')
+            with self.assertRaisesRegex(ValueError, 'ended at 1, expected 2'):
+                module.recover_copy(source, target, image)
+            self.assertFalse((target / 'spool-recovery.json').exists())
+
+
 class QueueAndCapacityTests(unittest.TestCase):
     """佇列容量與初始化進度在失敗／重送後仍保持正確。"""
+    def test_spool_usage_survives_restart_and_rebuilds_after_legacy_writer(self):
+        # 模擬舊版清理資料只更新游標；第一次重算並校準，下一次重啟只讀計數。
+        module = importlib.import_module('01_collector.delivery')
+        with tempfile.TemporaryDirectory() as root:
+            options = dict(DEFAULTS, min_free_gib=.00001)
+            spool = Spool(root, options)
+            spool.emit(dict(event(), note='原文')); spool.emit(event(number=2)); spool.close()
+            with spool.db:
+                spool.db.execute('DELETE FROM items WHERE seq=1')
+                spool.db.execute('UPDATE state SET ack=1')
+            size = spool.db.execute('SELECT length(cast(payload AS BLOB)) FROM items').fetchone()[0]
+            spool.db.close()
+            original = module.database
+            statements = []
+            def traced(path):
+                # 記錄實際 SQL，驗證正常重啟與整批 ACK 都免於重讀整段 payload。
+                db = original(path); db.set_trace_callback(statements.append)
+                return db
+            with patch.object(module, 'database', traced):
+                for rebuild in (True, False):
+                    statements.clear()
+                    spool = Spool(root, options)
+                    self.assertEqual((spool.written, spool.ack, spool.bytes), (2, 1, size))
+                    self.assertEqual(any('sum(length' in sql for sql in statements), rebuild)
+                    if not rebuild:
+                        spool.pending_packet(); statements.clear(); spool.acknowledge(2)
+                        self.assertFalse(any('sum(length' in sql for sql in statements))
+                        self.assertEqual(spool.bytes, 0)
+                    spool.close(); spool.db.close()
+
+    def test_transient_full_spool_can_drain_and_resume_in_order(self):
+        # 用真實背景寫入執行緒填滿一筆額度，延後 ACK 再核對下一筆仍可恢復。
+        with tempfile.TemporaryDirectory() as root:
+            options = dict(DEFAULTS, batch_size=1, min_free_gib=.00001, spool_capacity_wait_seconds=2)
+            spool = Spool(root, options)
+            record = event()
+            options['spool_max_bytes'] = len(json.dumps(dict(record, delivery_sequence=1)).encode()) + 5
+            spool.emit(record); spool.emit(record)
+            deadline = time.monotonic() + 2
+            while not spool.capacity_waits and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertEqual(spool.capacity_waits, 1)
+            self.assertEqual([r['seq'] for r in spool.pending()], [1])
+            spool.acknowledge(1)
+            spool.close(); spool.db.close()
+            restored = Spool(root, options)
+            self.assertEqual((restored.ack, restored.written), (1, 2))
+            self.assertEqual(restored.pending()[0]['record']['raw'], record['raw'])
+            restored.close(); restored.db.close()
+
+    def test_prolonged_full_spool_preserves_unacknowledged_prefix(self):
+        # 逾時仍受硬額度限制，已經落盤的首筆不會被覆寫或誤報已確認。
+        with tempfile.TemporaryDirectory() as root:
+            record = event()
+            options = dict(DEFAULTS, batch_size=1, min_free_gib=.00001, spool_capacity_wait_seconds=.02,
+                           spool_max_bytes=len(json.dumps(dict(record, delivery_sequence=1)).encode()) + 5)
+            spool = Spool(root, options)
+            spool.emit(record); spool.emit(record)
+            with self.assertRaisesRegex(fixtures.StorageError, 'exceeds capacity'):
+                spool.close()
+            self.assertEqual((spool.ack, spool.written, spool.capacity_waits), (0, 1, 1))
+            self.assertEqual(spool.pending()[0]['record']['raw'], record['raw'])
+            spool.db.close()
+
+    def test_encoded_batch_wire_format_and_byte_limit(self):
+        # 非 ASCII、跳脫與二進位封裝須與舊版接收端相容，切批不遺失序號。
+        module = importlib.import_module('01_collector.delivery')
+        with tempfile.TemporaryDirectory() as root:
+            opts = dict(DEFAULTS, min_free_gib=.00001)
+            spool = Spool(root, opts)
+            records = [dict(event(), note='原文\n"\\'), dict(event(), encoding='base64', raw='YWJj')]
+            for record in records: spool.emit(record)
+            spool.close()
+            native = [dict(seq=n, record=dict(r, delivery_sequence=n)) for n, r in enumerate(records, 1)]
+            expected = module.stable_json(dict(type='batch', batch=native)).encode()
+            self.assertEqual(spool.pending_packet(), expected)
+            opts['batch_max_bytes'] = len(expected) - 1
+            self.assertEqual(spool.pending(), native[:1])
+            spool.acknowledge(1)
+            self.assertEqual(spool.pending(), native[1:])
+            spool.acknowledge(2); self.assertEqual(spool.pending_packet(), b'')
+            spool.db.close()
+
     def test_ack_counts_bytes_only_in_confirmed_prefix(self):
         # 中文原文用位元組計量；確認第一筆後，剩餘大小與原文完全一致。
         with tempfile.TemporaryDirectory() as root:
@@ -340,6 +504,78 @@ class QueueAndCapacityTests(unittest.TestCase):
             self.assertEqual(scheduler.db.execute('SELECT owner FROM jobs WHERE id=?',(job['id'],)).fetchone()[0],'b')
             self.assertEqual(scheduler.db.execute('SELECT count(*) FROM progress').fetchone()[0],0)
             scheduler.close()
+
+
+class DeliveryIsolationTests(unittest.IsolatedAsyncioTestCase):
+    """慢速日誌、退役積壓和取消程序不能佔用其他副本的持久化權限。"""
+    async def asyncSetUp(self):
+        # 每個案例使用獨立主管、真實 SQLite 與 JSONL；無須連接交易所。
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.value = config()
+        runtime = fixtures.LocalRuntime(self.root, self.value)
+        self.supervisor = importlib.import_module('01_collector.supervisor').Supervisor(self.root, self.value, runtime)
+
+    async def asyncTearDown(self):
+        # 確認測試交易已結束後才關閉資料庫與移除輸出。
+        self.supervisor.schedule.close()
+        self.supervisor.store.close()
+        self.temp.cleanup()
+
+    async def test_slow_notice_writer_does_not_delay_durable_ack(self):
+        # 刻意阻擋告警輸出；這段期間另一條行情仍須落盤並回覆 ACK。
+        store = self.supervisor.store
+        with store.db: store.notice('fixture_slow_log', worker='test')
+        entered = threading.Event(); release = threading.Event(); stop = asyncio.Event()
+        def slow_log(rows):
+            # 日誌執行緒在測試發出放行訊號之前保持等待。
+            entered.set(); release.wait(5)
+        with patch.object(store, 'print_notices', slow_log):
+            task = asyncio.create_task(self.supervisor.publish_notices(stop))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                ack = await asyncio.wait_for(self.supervisor.locked(send, store, 'live', [event()]), 2)
+                self.assertEqual(ack, 1)
+                self.assertEqual(store.db.execute('SELECT written FROM output').fetchone()[0], 1)
+                self.assertEqual(len(store.pending_notices()), 1)
+            finally:
+                stop.set(); release.set(); await task
+        self.assertEqual(store.pending_notices(), [])
+
+    async def test_cancel_keeps_commit_lock_until_background_writer_exits(self):
+        # 已開始的背景交易無法由協程取消；後來的寫入必須等它離開。
+        entered = threading.Event(); release = threading.Event(); next_entered = threading.Event()
+        def slow_write():
+            # 使用兩個跨執行緒訊號驗證持鎖邊界，不依賴磁碟延遲。
+            entered.set(); release.wait(5)
+        task = asyncio.create_task(self.supervisor.locked(slow_write))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+        task.cancel()
+        later = asyncio.create_task(self.supervisor.locked(next_entered.set))
+        try:
+            self.assertFalse(await asyncio.to_thread(next_entered.wait, .05))
+        finally:
+            release.set()
+        with self.assertRaises(asyncio.CancelledError): await task
+        await asyncio.wait_for(later, 2)
+
+    async def test_retired_spool_releases_commit_lock_between_batches(self):
+        # 退役副本以小批次重播，中間可正常提交活躍副本，最後才清理舊 spool。
+        supervisor = self.supervisor
+        supervisor.options['batch_max_bytes'] = 1
+        root = supervisor.paths['spool'] / 'retired'
+        spool = Spool(root, supervisor.options)
+        for n in (1, 2, 3): spool.emit(event(number=n))
+        spool.close(); spool.db.close()
+        self.assertFalse(await supervisor.locked(supervisor.recover_spool_batch, 'retired'))
+        self.assertEqual(supervisor.store.cursor('retired'), 1)
+        self.assertTrue(root.is_dir())
+        self.assertEqual(await supervisor.locked(send, supervisor.store, 'live', [event(number=4)]), 1)
+        while not await supervisor.locked(supervisor.recover_spool_batch, 'retired'):
+            pass
+        self.assertEqual(supervisor.store.cursor('retired'), 3)
+        self.assertFalse(root.exists())
+        self.assertFalse(supervisor.recovery_dbs)
 
 
 class ScheduleAsyncTests(unittest.IsolatedAsyncioTestCase):

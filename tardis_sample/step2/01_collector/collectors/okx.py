@@ -7,6 +7,7 @@ class Collector(BaseCollector):
     batch_field = 'data'
 
     application_heartbeat = 'ping'
+    text_heartbeat_replies = ('pong', b'pong')
     # 僅列出具可靠原生事件身分的來源；身分不等於連續性保證。
     replica_strong_channels = ('trades', 'books', 'bbo-tbt')
     continuity_channels = {'books': 'prevSeqId/seqId with reset'}

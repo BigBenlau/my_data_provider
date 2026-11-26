@@ -38,6 +38,17 @@ def adapter(market):
     return import_module(f'.collectors.{ADAPTERS[market]}', __package__).Collector
 
 
+def decode_frame(raw, **json_options):
+    # 行情走 JSON 解碼；舊紀錄也可能包含交易所定義的純文字控制訊息。
+    try:
+        return json.loads(raw, **json_options)
+    except json.JSONDecodeError:
+        for market in ADAPTERS:
+            if raw in adapter(market).text_heartbeat_replies:
+                return raw.decode('ascii') if isinstance(raw, bytes) else raw
+        raise
+
+
 def configuration(path=None, markets=None, symbols=None):
     # 載入單一設定檔、檢查參數與商品代碼，再讓各交易所驗證自己的來源 metadata。
     settings = json.loads((Path(path) if path else COLLECTOR_ROOT / 'settings.json').read_text())
@@ -55,7 +66,7 @@ def configuration(path=None, markets=None, symbols=None):
         raise ValueError('empty or duplicate symbols')
     if any(not s.isascii() or not s.replace('-', '').isalnum() for s in settings['symbols']):
         raise ValueError('invalid symbol')
-    for key in ('queue_capacity','min_free_gib','segment_seconds','snapshot_interval','oi_interval','heartbeat_seconds','ws_max_age','rest_timeout','ws_attempts_per_5min'):
+    for key in ('queue_capacity','min_free_gib','segment_seconds','heartbeat_seconds','ws_max_age','ws_attempts_per_5min'):
         if settings[key] <= 0: raise ValueError(f'{key} must be positive')
     for key in ('log_max_bytes', 'log_backup_count'):
         if not isinstance(settings[key], int) or settings[key] < 1:
@@ -122,6 +133,7 @@ class BaseCollector:
     connection_spacing = .25
     requires_ack = True
     application_heartbeat = None
+    text_heartbeat_replies = ()
     replica_group_limit = 100
     continuity_channels = {}
     replica_silence_seconds = {}
@@ -183,22 +195,16 @@ class BaseCollector:
     def replica_limit(cls, market):
         # 分組上限由各 adapter 宣告，跨市場差異可覆寫此方法。
         return cls.replica_group_limit
-    @staticmethod
-    def default_symbols(market): 
-        # 提供其他市場示範商品；特殊商品代碼由交易所子類別覆寫。
-        return ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
     @classmethod
     def configure(cls, config, market):
         # 標示尚屬原始採集示範的能力邊界，不假裝已完成正規化與 book recovery。
         config['metadata'][market] = {'capability': cls.capability, 'channels': cls.channels(market),
                                       'note': 'Migrated public WS sample; normalization and book recovery not implemented.'}
     def __init__(self,config,root,writer,http):
-        # 初始化共用代理、狀態、配額與 REST 併發上限。
+        # 初始化共用代理、連線狀態與各市場的 WebSocket 連線預算。
         self.config=config; self.root=root; self.writer=writer; self.http=http; self.stats={}; self.events=Counter()
         self.proxy=proxy_url(config['proxy']); self.start=time.monotonic()
-        self.budgets={m:Budget(config['rest_weight_per_minute'].get(m,1200)) for m in config['markets']}
         self.ws_budgets={m:Budget(config['ws_attempts_per_5min'],300) for m in config['markets']}
-        self.rest_slots=asyncio.Semaphore(6)
     def stat(self,feed):
         # 取得或建立每條 feed 的計數、連線、訂閱與最近有效資料狀態。
         return self.stats.setdefault(key(feed),{'received':0,'connected':False,'subscribed':False,'last_valid_us':None,'last_valid_mono':None,
@@ -336,7 +342,7 @@ class BaseCollector:
         self.emit(feed, 'ws', session, raw=base64.b64encode(message.data).decode('ascii') if binary else message.data,
                   encoding='base64' if binary else 'utf8', endpoint=endpoint, local_timestamp=received)
         try:
-            obj = 'pong' if message.data in ('pong', b'pong') else json.loads(message.data)
+            obj = decode_frame(message.data)
             kind, data = self.classify(feed, obj)
             if kind == 'error':
                 raise ProtocolError(str(obj))
