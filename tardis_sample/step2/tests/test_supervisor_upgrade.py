@@ -1,7 +1,10 @@
 """驗證主管交接、單一寫入權與故障副本的隔離行為。"""
 import asyncio
+from contextlib import redirect_stderr, redirect_stdout
 import importlib
+import io
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -10,6 +13,48 @@ import test_redundancy as fixtures
 
 roles = importlib.import_module('01_collector.leadership')
 manager = importlib.import_module('01_collector.supervisor')
+collector = importlib.import_module('01_collector.01_collect')
+
+
+class RunIdTests(unittest.TestCase):
+    def test_new_run_publishes_unique_compose_batch_path(self):
+        # 同一秒啟動兩次須保留不同目錄；容器內的 manifest 沿用主機批次名稱。
+        with TemporaryDirectory() as parent:
+            args = ['01_collect.py', 'new-run', '--output-root', parent]
+            paths = set()
+            for _ in range(2):
+                with patch.object(sys, 'argv', args), redirect_stdout(io.StringIO()) as stdout:
+                    self.assertEqual(collector.main(), 0)
+                root = Path(stdout.getvalue().strip())
+                self.assertEqual(root.parent, Path(parent).resolve())
+                self.assertTrue(root.is_dir())
+                self.assertRegex(root.name, r'^\d{8}T\d{6}Z-[0-9a-f]{8}$')
+                runtime = SimpleNamespace(host_root=str(root / 'binance'))
+                self.assertEqual(manager.initial_run_id('/data', 'binance', runtime), root.name)
+                paths.add(root)
+            self.assertEqual(len(paths), 2)
+
+    def test_automatic_cluster_output_and_explicit_takeover(self):
+        # 新批次自選目錄，交接或 Docker 掛載則必須沿用明確路徑。
+        with TemporaryDirectory() as parent:
+            base = ['01_collect.py', 'cluster', '--exchange', 'binance']
+            with patch.object(manager, 'run_supervisor', AsyncMock(return_value=0)) as run:
+                with patch.object(sys, 'argv', base + ['--backend', 'local', '--output-root', parent]):
+                    self.assertEqual(collector.main(), 0)
+                auto_path = Path(run.call_args.args[0].output)
+                self.assertEqual(auto_path.parents[1], Path(parent).resolve())
+                self.assertTrue(auto_path.parent.is_dir())
+                explicit = base + ['--takeover', '--supervisor-id', 'next', '--output', str(auto_path)]
+                with patch.object(sys, 'argv', explicit):
+                    self.assertEqual(collector.main(), 0)
+                self.assertEqual(Path(run.call_args.args[0].output), auto_path)
+                with patch.object(sys, 'argv', explicit[:-2]), redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as exc:
+                        collector.main()
+                self.assertEqual(exc.exception.code, 2)
+                self.assertIn('require an explicit --output', err.getvalue())
+                self.assertEqual(run.await_count, 2)
+                self.assertEqual(list(Path(parent).resolve().iterdir()), [auto_path.parent])
 
 
 class UpgradeTests(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +139,7 @@ class UpgradeTests(unittest.IsolatedAsyncioTestCase):
         old, old_job = self.launch('primary')
         await self.wait_for(lambda: old.sample('primary') and old.sample('primary')['seq'] > 4)
         first = roles.read(self.root / 'status.json')
+        run_id = roles.read(self.root / 'manifest.json')['run_id']
         new, new_job = self.launch('next')
         await self.wait_for(lambda: roles.read(old.owner).get('owner') == 'next')
         last = roles.read(self.root / 'status.json')
@@ -104,6 +150,7 @@ class UpgradeTests(unittest.IsolatedAsyncioTestCase):
         old.cancel.set()
         await old_job
         await self.wait_for(lambda: roles.read(self.root / 'status.json')['raw_records'] > last['raw_records'])
+        self.assertEqual(roles.read(self.root / 'manifest.json')['run_id'], run_id)
         self.assertEqual(self.connections, 2)
         new.cancel.set()
         self.assertEqual(await new_job, 0)

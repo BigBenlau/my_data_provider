@@ -25,6 +25,20 @@ from .redundancy import code_hashes
 from .transport import COLLECTOR_ROOT, adapter, configuration, feeds, reason
 from .raw import Writer, StorageError, SCHEMA_VERSION as CHANNEL_CSV_SCHEMA_VERSION, export_channels
 
+DEFAULT_RAW_ROOT = COLLECTOR_ROOT / 'output' / 'raw'
+
+
+def reserve_batch(output_root=None):
+    # 以 UTC 時間及隨機後綴保留新批次目錄，既有批次不會被覆寫。
+    from .supervisor import new_run_id
+
+    parent = Path(output_root or DEFAULT_RAW_ROOT).expanduser().resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    batch = parent / new_run_id()
+    batch.mkdir()
+    return batch
+
+
 def prepare_run(args, config):
     # 鎖定輸出目錄，建立獨立批次與來源版本；初始化失敗也必須釋放鎖。
     base = Path(args.output).resolve()
@@ -247,7 +261,7 @@ def main():
     managed_commands(commands)
     for name in ('run','supervise'):
         p=commands.add_parser(name)
-        p.add_argument('--config');p.add_argument('--output',default=str(COLLECTOR_ROOT / 'output' / 'raw'))
+        p.add_argument('--config');p.add_argument('--output',default=str(DEFAULT_RAW_ROOT))
         p.add_argument('--markets',nargs='+',choices=sorted(ADAPTERS));p.add_argument('--symbols',nargs='+')
         if name=='run':
             p.add_argument('--duration',type=float);p.add_argument('--dry-run',action='store_true')
@@ -258,6 +272,10 @@ def main():
     p.add_argument('--input',required=True);p.add_argument('--output',required=True);p.add_argument('--recover',action='store_true')
     args=parser.parse_args()
     configure_logging()
+    if args.command == 'new-run':
+        # Compose 會用 stdout 設定 DATA_ROOT，因此只印批次的絕對路徑。
+        print(reserve_batch(args.output_root))
+        return 0
     if args.command in ('cluster', 'worker'):
         return managed_main(args, parser)
     if args.command == 'export-jsonl':
@@ -284,6 +302,8 @@ def managed_commands(commands):
     # 新架構沿用 01 入口；舊 run／supervise 保留供既有操作相容。
     from .redundancy import FAMILIES
     from common.segments import utc_day
+    p = commands.add_parser('new-run', help='Reserve a new batch directory and print its absolute path')
+    p.add_argument('--output-root', type=Path, help='Parent of the generated batch directory')
     p = commands.add_parser('export-jsonl', help='Export one UTC receive day to YYYY-MM-DD.jsonl.gz')
     p.add_argument('--input', required=True, help='Supervisor run directory')
     p.add_argument('--output', required=True, help='Directory for daily JSONL files')
@@ -294,7 +314,10 @@ def managed_commands(commands):
     p.add_argument('--output', required=True, help='Dedicated resumable CSV directory')
     p = commands.add_parser('cluster', help='Supervisor with two identical workers')
     p.add_argument('--exchange', choices=sorted(FAMILIES), required=True)
-    p.add_argument('--config'); p.add_argument('--output', required=True)
+    p.add_argument('--config')
+    output = p.add_mutually_exclusive_group()
+    output.add_argument('--output', help='Exact run directory for an existing run or mounted storage')
+    output.add_argument('--output-root', type=Path, help='Parent for an automatically named batch')
     p.add_argument('--backend', choices=['docker', 'local'], default='docker')
     p.add_argument('--image', default='market-collector:local')
     p.add_argument('--supervisor-id', default='primary')
@@ -309,6 +332,24 @@ def managed_commands(commands):
     p.add_argument('--image', required=True)
 
 
+def validate_cluster_args(args, parser):
+    # 交接與 Docker 掛載必須明確指向同一批次，避免意外開新 run。
+    import re
+
+    if (args.takeover or args.host_output or args.data_volume) and not args.output:
+        parser.error('--takeover, --host-output and --data-volume require an explicit --output')
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', args.supervisor_id):
+        parser.error('invalid supervisor ID')
+    if args.takeover and (args.supervisor_id == 'primary' or args.duration):
+        parser.error('takeover requires a unique supervisor ID and continuous operation')
+    if args.upgrade_timeout < 15:
+        parser.error('upgrade-timeout must be at least 15 seconds')
+    if args.data_volume and (args.backend != 'docker' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+', args.data_volume)):
+        parser.error('data-volume requires Docker and a valid named volume')
+    if args.duration is not None and args.duration <= 0:
+        parser.error('duration must be positive')
+
+
 def managed_main(args, parser):
     # dry-run 不啟動 Docker、不連交易所，worker 僅接受 supervisor 封存設定。
     if args.command == 'worker':
@@ -318,22 +359,16 @@ def managed_main(args, parser):
             LOG.exception('event=worker_storage_failed'); return 74
         return 0
     from .redundancy import group_config, feed_groups, source_inventory, preflight
-    import re
-    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', args.supervisor_id):
-        parser.error('invalid supervisor ID')
-    if args.takeover and (args.supervisor_id == 'primary' or args.duration):
-        parser.error('takeover requires a unique supervisor ID and continuous operation')
-    if args.upgrade_timeout < 15:
-        parser.error('upgrade-timeout must be at least 15 seconds')
-    if args.data_volume:
-        if args.backend != 'docker' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+', args.data_volume):
-            parser.error('data-volume requires Docker and a valid named volume')
-    if args.duration is not None and args.duration <= 0: parser.error('duration must be positive')
+    validate_cluster_args(args, parser)
     if args.dry_run:
         config = group_config(args.exchange, args.config)
         print(json.dumps(dict(config=config, groups=feed_groups(config), sources=source_inventory(config), preflight=preflight(config)), indent=2))
         return 0
     from .supervisor import run_supervisor
+    if args.output is None:
+        # 只有真正啟動新批次才配置目錄，dry-run 及既有路徑不會產生新 ID。
+        args.output = str(reserve_batch(args.output_root) / args.exchange)
+        LOG.info('event=run_directory_selected exchange=%s output=%s', args.exchange, args.output)
     return asyncio.run(run_supervisor(args))
 
 

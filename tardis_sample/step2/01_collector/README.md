@@ -9,13 +9,14 @@
 ```bash
 cd tardis_sample/step2
 EXCHANGES=(binance bybit okx coinbase upbit)
-export RUN_ID=smoke-001
-export DATA_ROOT="$PWD/01_collector/output/raw/$RUN_ID"
+DATA_ROOT=$(python3 01_collector/01_collect.py new-run)
+export DATA_ROOT
+RUN_ID="${DATA_ROOT##*/}"
 docker compose -f 01_collector/compose.yaml config --quiet
 docker compose -f 01_collector/compose.yaml --profile build build collector
 ```
 
-`collector` 是建置五家共用映像 `market-collector:local` 的目標，每個交易所服務以 `--exchange` 載入自己的採集模組。`RUN_ID` 是這批資料的名稱。每次做新的短測，可改用 `smoke-002` 等新名稱並重新設定 `DATA_ROOT`。
+`collector` 是建置五家共用映像 `market-collector:local` 的目標，每個交易所服務以 `--exchange` 載入自己的採集模組。`new-run` 會產生 UTC 時戳加隨機後綴的批次名稱並印出絕對路徑。只在開新批次時執行一次。
 
 ### 每家 30 秒的首次驗證
 
@@ -34,8 +35,9 @@ done
 準備開始長期收集時，沿用上方的交易所清單，另外指定正式批次。
 
 ```bash
-export RUN_ID=run-001
-export DATA_ROOT="$PWD/01_collector/output/raw/$RUN_ID"
+DATA_ROOT=$(python3 01_collector/01_collect.py new-run)
+export DATA_ROOT
+RUN_ID="${DATA_ROOT##*/}"
 docker compose -f 01_collector/compose.yaml up -d "${EXCHANGES[@]}"
 docker compose -f 01_collector/compose.yaml ps "${EXCHANGES[@]}"
 docker compose -f 01_collector/compose.yaml logs --tail=30 "${EXCHANGES[@]}"
@@ -50,6 +52,8 @@ docker compose -f 01_collector/compose.yaml stop "${EXCHANGES[@]}"
 ```
 
 也可只停止其中一家，例如 `docker compose -f 01_collector/compose.yaml stop okx`。該家排空後即可處理其完整批次，其他服務可繼續採集。
+
+直接在主機啟動 `cluster` 時，省略 `--output` 即會自動建立 `output/raw/<run_id>/<交易所>/`。可用 `--output-root` 指定新批次的上層，例如外接磁碟。終端會記錄選中的路徑。重啟既有批次或以 `--takeover` 交接時，將原批次路徑傳給 `--output`。
 
 ## 監控採集
 
@@ -83,7 +87,7 @@ tail -F "$DATA_ROOT/$EXCHANGE/supervisor.log"
 
 例如預設 Binance 期貨 `bookTicker` 每個 worker 有三條 WS，分別訂閱 `BTCUSDT`、`ETHUSDT`、`GRTUSDT + SOLUSDT`。新增一般商品只需加入該市場的 `symbols`。以基礎資產判斷分組，例如 Upbit 的 `BTC-SOL` 屬於其餘商品。Binance、Bybit 若新增使用特殊報價幣的連寫商品，可在該市場明確指定 `"base_assets": {"BTCXYZ": "BTC"}`。同一基礎資產的不同報價交易對會進入同一資產組。
 
-可用 `python 01_collector/01_collect.py cluster --exchange binance --output /tmp/ws-layout --dry-run` 檢查 `groups` 中每條 WS 的 ID 及完整商品名單。運行日誌中的 `connect_attempt` 會記錄相同 ID，例如 `binance-futures/bookTicker/others/0`。改版部署或變更商品後使用新 run 目錄。
+可用 `python 01_collector/01_collect.py cluster --exchange binance --dry-run` 檢查 `groups` 中每條 WS 的 ID 及完整商品名單。運行日誌中的 `connect_attempt` 會記錄相同 ID，例如 `binance-futures/bookTicker/others/0`。變更商品或來源設定後使用新 run 目錄。
 
 | 交易所主管 | 市場 ID | 預設商品 | 每商品原生 channel 數 |
 |---|---|---|---|
@@ -254,7 +258,7 @@ python3 -m unittest discover -s tests -v
 
 `redundancy.index_hot_seconds` 預設 86400，已提交且最近一天沒有新觀察的索引搬到 `_state/index_archive.sqlite`。歷史身分及序號邊仍查詢得到，遲到事件不因 TTL 被漏判。新 run 的 `seen` 表將來源存為字典編號、可逆十六進位鍵存為二進位。其他原生字串保留原格式，熱區與歷史區共用永久字典。既有 run 使用原版本接續採集，不必就地遷移舊索引。封存分批以集合 SQL 處理，`index_archive_batch` 記錄包含等待提交鎖的耗時與每秒搬移筆數。每輪先持久複製、再刪熱索引，跨步驟崩潰可重做；不刪任何正式行情。`archive_batch_size=4096`、`archive_seconds=1` 限制每次工作量。歷史索引與正式行情仍隨保存期間增長；本次沒有設定資料保留期限或自動刪除歷史資料。磁碟需要按實際流量配置，封存速度不足也需調整批次與硬體容量。
 
-部署新程式必須重新建置映像並使用新的 run 目錄。舊資料可離線重播；不可將新程式直接混入舊 run 的版本身分。實際 500+ 商品吞吐與 Ubuntu 主機的長期容量仍需另做壓測，排程模擬不代表該容量已通過。
+部署新程式前先建置映像。若變更 worker、儲存或採集設定，使用新 run。相容的主管版本可沿用同一批次交接，操作方式見 [Docker 部署指南](DOCKER_DEPLOYMENT.md#讓兩個版本的主管交接)。既有資料可離線重播。實際 500+ 商品吞吐與 Ubuntu 主機的長期容量仍需另做壓測。
 
 效能調整仍保留 SQLite `synchronous=FULL`：WAL 自動 checkpoint 門檻改為 16384 頁（通常約 64 MiB），每個 SQLite 連線的頁面快取目標為 64 MiB，減少索引頁反覆寫入；快取按需使用，部署需計入全部連線的記憶體容量。每批最多 2048 筆／16 MiB，worker 每 0.25 秒刷出持久批次；ACK 僅計算已確認前綴的位元組，不掃描整個積壓。WAL 與歷史索引仍需磁碟預算，不能以關閉同步換取速度。暫時 TCP／TLS 失敗採 worker 自己的短期退避，不再全域封鎖另一條健康路由；確定的來源探測／路由協議失敗才更新共用診斷。退役 worker 的完整健康快照及連線標記會清理，交付游標與合併序號仍保留。
 

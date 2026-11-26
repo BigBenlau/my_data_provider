@@ -11,7 +11,8 @@ Git 已保存八個市場的 metadata。建置時 Docker 會將此版本的 `tar
 ```bash
 # 從 Git 專案根目錄進入部署目錄，這次短測使用獨立輸出路徑。
 cd tardis_sample/step2/01_collector
-export DATA_ROOT="$PWD/output/raw/smoke-001"
+DATA_ROOT=$(python3 01_collect.py new-run)
+export DATA_ROOT
 # 選一個服務名稱：binance、bybit、okx、coinbase 或 upbit。
 export EXCHANGE=okx
 
@@ -27,13 +28,16 @@ docker compose run --rm "$EXCHANGE" \
 
 需要固定 Python 基底版本時，可在建置命令加入 `--build-arg PYTHON_IMAGE=python@sha256:<digest>`，並將 `<digest>` 換成部署使用的映像摘要。
 
+`new-run` 使用主機上的專案 Python 環境，只建立一個由 UTC 時戳和隨機後綴命名的批次目錄，並印出絕對路徑。可用 `--output-root /mnt/hot/market-data` 選擇磁碟。用 `RUN_ID="${DATA_ROOT##*/}"` 取得批次 ID，供後續匯出或對帳命名。
+
 ## 啟動與停止正式採集
 
 沿用上一步的工作目錄。啟動單一交易所可指定服務名稱，啟動全部五家則使用 `docker compose up -d`。
 
 ```bash
 # 正式批次使用自己的輸出路徑。
-export DATA_ROOT="$PWD/output/raw/run-001"
+DATA_ROOT=$(python3 01_collect.py new-run)
+export DATA_ROOT
 docker compose up -d "$EXCHANGE"
 
 docker compose logs -f "$EXCHANGE"
@@ -44,6 +48,8 @@ docker compose stop "$EXCHANGE"
 ```
 
 `DATA_ROOT` 必須是 Docker 主機的絕對路徑，並使用本機磁碟。容器內是 `/data`。`--host-output` 供主管建立 worker 的相同 bind mount。SQLite WAL 不支援把本資料目錄放在 NFS 等網路檔案系統。Docker socket 只掛載主管，具有主機容器管理權限，應部署在可信的專用主機。
+
+只在開新批次時執行 `new-run`。同一批次的重啟、停止和主管交接繼續使用原本的 `DATA_ROOT`。如果已換終端，可以從現有容器的 `/data` 掛載還原路徑。
 
 新 worker 的 Docker 名稱是 `collector-<交易所>-<批次識別>-<worker ID>`。六碼批次識別來自資料目錄或 volume 名稱，同批次各副本的最後一段不同。主管把實際名稱寫在該批次的 `_state/runtime.json`，重啟可依登記名稱接管。現有容器沿用建立時的名稱與標籤，新版批次建立的 worker 會帶有 `collector.exchange` 標籤。
 
@@ -57,7 +63,7 @@ docker compose stop "$EXCHANGE"
 
 適用於已由支援交接的版本啟動、且已有 `_state/owner.json` 的批次。一個正式寫入鎖保護 JSONL、索引與 REST 排程。候選主管沿用原 A/B 程序、行情連線及固定的 worker 映像。只有主管管理程式及其相容執行環境可以獨立換版。第一次從沒有交接協議的舊映像部署時，請保留舊批次，以維護窗口正常排空並用新 run 啟動基線版本；舊映像收到正常停止訊號會同步排空其 workers。
 
-從本目錄在同一台 Docker 主機執行。下例針對 Binance，其他四家只需換交易所和原主管名稱。沿用原主管的 `DATA_ROOT`、採集設定及資料掛載。若原服務使用自訂 `--config`，候選也傳相同選項及可見檔案。下列範例適用於本專案 Compose 的 bind mount 部署。
+從本目錄在同一台 Docker 主機執行。下例針對 Binance，其他四家只需換交易所和原主管名稱。候選從原容器取得批次路徑並沿用掛載。若原服務使用自訂 `--config`，候選也傳相同選項及可見檔案。下列範例適用於本專案 Compose 的 bind mount 部署。
 
 ```bash
 export EXCHANGE=binance
@@ -65,17 +71,25 @@ export OLD=step2-binance-1
 export RELEASE=r2
 export NEW="supervisor-${EXCHANGE}-${RELEASE}"
 
+# 核對原主管已支援交接，並取得現有批次在主機上的路徑。
+docker exec "$OLD" python /app/step2/01_collector/01_collect.py cluster --help |
+  grep -F -- '--takeover' >/dev/null || exit 1
+docker exec "$OLD" test -s /data/_state/owner.json || exit 1
+HOST_RUN=$(docker inspect -f '{{range .Mounts}}{{if and (eq .Destination "/data") (eq .Type "bind")}}{{.Source}}{{end}}{{end}}' "$OLD")
+test -n "$HOST_RUN" || exit 1
+
 # 以獨立標籤建置新版主管，保留原 worker 映像供該批次替補。
 docker build -f ../Dockerfile -t "market-collector:${RELEASE}" ../..
 IMAGE_ID=$(docker image inspect -f '{{.Id}}' "market-collector:${RELEASE}")
 
 # 共用原容器的行情目錄、Docker socket 與主管鎖 volume。
-docker run -d --init --restart unless-stopped --name "$NEW" \
+# 先驗證候選。接手成功後才啟用自動重啟。
+docker run -d --init --restart=no --stop-timeout 90 --name "$NEW" \
   --log-opt max-size=10m --log-opt max-file=3 \
   --volumes-from "$OLD" -e TZ=Asia/Shanghai \
   -e SUPERVISOR_LOCK_ROOT=/var/lib/collector-locks "$IMAGE_ID" \
   python /app/step2/01_collector/01_collect.py cluster \
-  --exchange "$EXCHANGE" --output /data --host-output "$DATA_ROOT/$EXCHANGE" \
+  --exchange "$EXCHANGE" --output /data --host-output "$HOST_RUN" \
   --supervisor-id "$RELEASE" --takeover --upgrade-timeout 120
 
 docker logs -f "$NEW"
@@ -86,7 +100,9 @@ docker logs -f "$NEW"
 核對成功後可停止待命容器。以後查看日誌、停止或重新啟動該交易所時，操作目前的主管容器；下一次交接以它作為 `OLD`，並使用新的 `RELEASE`。
 
 ```bash
-docker exec "$NEW" python -c 'import json, sys; sys.exit(json.load(open("/data/_state/owner.json"))["owner"] != sys.argv[1])' "$RELEASE" && docker stop "$OLD"
+docker exec "$NEW" python -c 'import json, sys; sys.exit(json.load(open("/data/_state/owner.json"))["owner"] != sys.argv[1])' "$RELEASE" &&
+  docker update --restart unless-stopped "$NEW" &&
+  docker stop --time 90 "$OLD"
 ```
 
 Compose 主管共用 Docker 原生的 `supervisor_locks` volume，並按交易所與批次區分鎖。請在整個 run 期間保留這個 volume。候選若看不到舊主管持有的鎖會在交接前報錯。使用 Docker 資料 volume 時，雙方傳入相同的 `--data-volume` 替代 `--host-output`。直接對運行中的服務執行 `docker compose up` 重建容器會走一般停止流程；需要不中斷換主管時請使用上述交接命令。
@@ -212,7 +228,8 @@ docker ps --filter "label=collector.exchange=$EXCHANGE" --format '{{.Names}}'
 新去重版本請指定全新的 `DATA_ROOT`。第二顆本機磁碟以獨立檔案系統掛載。先在 Linux 核對裝置及掛載點，再在冷盤建立一次持久 UUID。保留此標識並備份；已存在時沿用原值。
 
 ```bash
-export DATA_ROOT=/mnt/hot/market-data/run-002
+DATA_ROOT=$(python3 01_collect.py new-run --output-root /mnt/hot/market-data)
+export DATA_ROOT
 export COLD_ROOT=/mnt/cold
 findmnt --mountpoint "$COLD_ROOT"
 lsblk -o NAME,PKNAME,SERIAL,FSTYPE,MOUNTPOINTS

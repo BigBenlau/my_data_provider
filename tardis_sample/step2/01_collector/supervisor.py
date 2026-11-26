@@ -2,6 +2,7 @@
 import asyncio
 import json
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import math
@@ -9,7 +10,7 @@ import aiohttp
 import signal
 import time
 import uuid
-from common import LOG, atomic_json, configure_logging, close_log
+from common import LOG, atomic_json, configure_logging, close_log, utc
 from .delivery import MergeStore, database, read_packet, write_packet
 from .redundancy import group_config, identity, local_paths
 from .replica_monitor import Monitor
@@ -22,6 +23,20 @@ from .cold import archive_files
 from .storage_health import StorageHealth
 from .raw import StorageError
 from .leadership import Leadership, acquire, publish, read
+
+
+def new_run_id():
+    # UTC 時戳便於按開始時間排序，隨機後綴用來區分同秒建立的批次。
+    return utc(time.time_ns() // 1000, '%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
+
+
+def initial_run_id(root, family, runtime):
+    # Compose 的 /data 看不到主機批次名稱，使用實際掛載路徑辨識自動建立的批次。
+    mount = Path(getattr(runtime, 'host_root', None) or root)
+    batch_id = mount.parent.name
+    if mount.name == family and re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', batch_id):
+        return batch_id
+    return new_run_id()
 
 
 class Supervisor:
@@ -56,10 +71,12 @@ class Supervisor:
         # 正式 JSONL 使用第三版；舊資料仍由既有 reader 支援。
         path = self.root / 'manifest.json'
         if path.exists():
+            # 重啟與交接沿用已保存的 run_id，讓批次及匯出來源身分保持一致。
             manifest = json.loads(path.read_text())
             if manifest.get('identity') != self.expected: raise ValueError('existing run version/config/image mismatch; use new output')
         else:
-            manifest = dict(schema_version=3, dedup_rule_version=2, run_id=self.root.name, started_us=time.time_ns() // 1000,
+            run_id = initial_run_id(self.root, self.config['family'], self.runtime)
+            manifest = dict(schema_version=3, dedup_rule_version=2, run_id=run_id, started_us=time.time_ns() // 1000,
                             config=self.config, identity=self.expected, channel_csv_schema_version=1,
                             processing='replica_merge_only', order_book_reconstruction=False,
                             outputs=['raw_jsonl'], raw_partition='utc_receive_date', channel_csv_export='on_demand')
