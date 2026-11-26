@@ -193,8 +193,8 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             w=Writer(d,min_free_gib=.001,segment_seconds=.01)
             w.emit('event',local_timestamp=NOW,n=1);time.sleep(.05);w.emit('event',local_timestamp=NOW-1000,n=2);w.close()
-            rs=list(read_records(d));self.assertEqual([r['seq'] for r in rs],[1,2]);self.assertEqual(len(list((Path(d)/'raw').glob('*.gz'))),2)
-            p=next((Path(d)/'raw').glob('*.gz'));part=p.with_name(p.name+'.part');p.rename(part)
+            rs=list(read_records(d));self.assertEqual([r['seq'] for r in rs],[1,2]);self.assertEqual(len(list((Path(d)/'raw').rglob('*.gz'))),2)
+            p=next((Path(d)/'raw').rglob('*.gz'));part=p.with_name(p.name+'.part');p.rename(part)
             with self.assertRaises(ValueError):list(read_records(d))
             self.assertEqual(len(list(read_records(d,True))),2)
             part.write_bytes(part.read_bytes()[:-8]);warnings=[];list(read_records(d,True,warnings));self.assertTrue(warnings)
@@ -597,7 +597,7 @@ class OriginalChannelTests(unittest.TestCase):
                 with self.assertRaisesRegex(StorageError, 'channel disk failed'):
                     writer.close()
             self.assertEqual(len(list(read_records(d, recover=True))), 1)
-            self.assertTrue(list((Path(d) / 'raw').glob('*.part')))
+            self.assertTrue(list((Path(d) / 'raw').rglob('*.part')))
 
     def test_active_rejected_unclean_recovered_and_counts_checked(self):
         # 拒絕讀取活動 run，未正常關閉需 recover，筆數不符必須回報。

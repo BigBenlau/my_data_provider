@@ -39,7 +39,7 @@ def prepare_run(args, config):
             'schema_version': 2, 'run_id': run_id, 'started_us': time.time_ns() // 1000,
             'status': 'running', 'config': config,
             'channel_csv_schema_version': CHANNEL_CSV_SCHEMA_VERSION,
-            'outputs': ['raw_jsonl', 'raw_channel_csv'],
+            'outputs': ['raw_jsonl', 'raw_channel_csv'], 'raw_partition': 'utc_receive_date',
             'processing': 'raw_capture', 'order_book_reconstruction': False,
             'code_sha256': code_hashes(),
         }
@@ -260,9 +260,13 @@ def main():
     configure_logging()
     if args.command in ('cluster', 'worker'):
         return managed_main(args, parser)
+    if args.command == 'export-jsonl':
+        from .raw import export_day_jsonl
+        print(json.dumps(export_day_jsonl(args.input, args.output, args.date)))
+        return 0
     if args.command == 'export-csv':
         from .channel_export import Exporter
-        print(json.dumps(Exporter(args.input, args.output).run()))
+        print(json.dumps(Exporter(args.input, args.output, args.date).run()))
         return 0
     if args.command=='replay':
         result=export_channels(args.input,args.output,args.recover)
@@ -279,14 +283,23 @@ def main():
 def managed_commands(commands):
     # 新架構沿用 01 入口；舊 run／supervise 保留供既有操作相容。
     from .redundancy import FAMILIES
+    from common.segments import utc_day
+    p = commands.add_parser('export-jsonl', help='Export one UTC receive day to YYYY-MM-DD.jsonl.gz')
+    p.add_argument('--input', required=True, help='Supervisor run directory')
+    p.add_argument('--output', required=True, help='Directory for daily JSONL files')
+    p.add_argument('--date', type=utc_day, required=True)
     p = commands.add_parser('export-csv', help='Incrementally export sealed JSONL as channel CSV.gz')
     p.add_argument('--input', required=True, help='Supervisor run directory')
+    p.add_argument('--date', type=utc_day, help='UTC receive date YYYY-MM-DD')
     p.add_argument('--output', required=True, help='Dedicated resumable CSV directory')
     p = commands.add_parser('cluster', help='Supervisor with two identical workers')
     p.add_argument('--exchange', choices=sorted(FAMILIES), required=True)
     p.add_argument('--config'); p.add_argument('--output', required=True)
     p.add_argument('--backend', choices=['docker', 'local'], default='docker')
     p.add_argument('--image', default='market-collector:local')
+    p.add_argument('--supervisor-id', default='primary')
+    p.add_argument('--takeover', action='store_true', help='Verify and take over a running supervisor')
+    p.add_argument('--upgrade-timeout', type=int, default=120)
     storage = p.add_mutually_exclusive_group()
     storage.add_argument('--host-output', help='Docker host absolute path corresponding to --output')
     storage.add_argument('--data-volume', help='Docker named volume mounted at --output in the supervisor')
@@ -305,8 +318,14 @@ def managed_main(args, parser):
             LOG.exception('event=worker_storage_failed'); return 74
         return 0
     from .redundancy import group_config, feed_groups, source_inventory, preflight
+    import re
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', args.supervisor_id):
+        parser.error('invalid supervisor ID')
+    if args.takeover and (args.supervisor_id == 'primary' or args.duration):
+        parser.error('takeover requires a unique supervisor ID and continuous operation')
+    if args.upgrade_timeout < 15:
+        parser.error('upgrade-timeout must be at least 15 seconds')
     if args.data_volume:
-        import re
         if args.backend != 'docker' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+', args.data_volume):
             parser.error('data-volume requires Docker and a valid named volume')
     if args.duration is not None and args.duration <= 0: parser.error('duration must be positive')

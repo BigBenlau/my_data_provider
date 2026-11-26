@@ -1,5 +1,6 @@
 """待交付緩衝與 supervisor 提交日誌；確認必須晚於正式 JSONL 持久化。"""
 from collections import defaultdict, deque
+from itertools import groupby
 import json
 import logging
 import os
@@ -12,10 +13,11 @@ import time
 import asyncio
 import struct
 from common import LOG, utc
+from common.segments import disk_names, first_seq
 from .transport import key
 from .raw import StorageError
 from .redundancy import stable_json, source_inventory
-from .replica_protocol import atoms
+from .replica_protocol import Decoder
 from .retention import IndexArchive, sync_directory
 
 MAX_PACKET_BYTES = 32 * 1024**2
@@ -69,6 +71,7 @@ class Spool:
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.options = options; self.lock = threading.RLock()
         self.space = threading.Condition(self.lock)
+        self.written_bytes = 0
         self.capacity_waits = 0; self.last_capacity_warning = None
         self.memory_lock = threading.Lock(); self.queued_bytes = 0
         self.db = database(self.root / 'spool.sqlite')
@@ -78,6 +81,7 @@ class Spool:
         self.seq, self.ack = self.db.execute('SELECT seq,ack FROM state').fetchone()
         self.written = self.seq; self.error = None; self.high_water = 0
         self.sent_range = None
+        pending_ranges.register(self.db)
         self.bytes = self.restore_usage()
         self.oldest_us = 0; self.last_checkpoint = time.monotonic(); self.refresh_oldest()
         self.queue = queue.Queue(100000); self.last_write = time.monotonic()
@@ -111,7 +115,7 @@ class Spool:
             limit = self.options.get('memory_queue_bytes', 64 * 1024**2)
             if self.queued_bytes + size > limit:
                 raise StorageError(f'spool memory byte limit exceeded: queued_bytes={self.queued_bytes} record_bytes={size} limit_bytes={limit}')
-            try: self.queue.put_nowait((sequence, payload))
+            try: self.queue.put_nowait((sequence, payload, key(record), record['local_timestamp']))
             except queue.Full as exc: raise StorageError('spool memory queue full') from exc
             self.seq = sequence
             self.queued_bytes += size
@@ -120,15 +124,16 @@ class Spool:
 
     def write(self, batch):
         # 序號與 payload 在同一交易提交，禁止傳送尚未持久化的資料。
-        size = sum(len(p.encode()) for _, p in batch)
+        size = sum(len(r[1].encode()) for r in batch)
         with self.space:
             self.wait_for_space(size)
             disk_guard(self.root, self.options['min_free_gib'])
             with self.db:
-                self.db.executemany('INSERT INTO items VALUES(?,?)', batch)
+                self.db.executemany('INSERT INTO items VALUES(?,?)', (row[:2] for row in batch))
+                pending_ranges.record_ranges(self.db,[(r[0],r[2],r[3]) for r in batch])
                 self.db.execute('UPDATE state SET seq=? WHERE id=1', (batch[-1][0],))
                 self.save_usage(batch[-1][0], self.ack, self.bytes + size)
-            self.written = batch[-1][0]; self.bytes += size
+            self.written = batch[-1][0]; self.bytes += size; self.written_bytes += size
             if not self.oldest_us: self.refresh_oldest()
             self.last_write = time.monotonic()
         with self.memory_lock: self.queued_bytes -= size
@@ -169,7 +174,7 @@ class Spool:
             self.error = exc
             LOG.exception('event=spool_failed root=%s', self.root)
 
-    def pending_packet(self):
+    def pending_packet(self, after=0):
         # spool 已保存合法的 UTF-8 JSON；直接裝入原有 IPC 封裝，按完整封包的位元組數切批。
         prefix, suffix = b'{"batch":[', b'],"type":"batch"}'
         limit = min(self.options.get('batch_max_bytes', 16 * 1024**2), MAX_PACKET_BYTES)
@@ -177,7 +182,7 @@ class Spool:
         size = len(prefix) + len(suffix)
         payload_bytes = 0
         with self.lock:
-            cursor = self.db.execute('SELECT seq,cast(payload AS BLOB) FROM items ORDER BY seq LIMIT ?', (self.options['batch_size'],))
+            cursor = self.db.execute('SELECT seq,cast(payload AS BLOB) FROM items WHERE seq>? ORDER BY seq LIMIT ?', (after,self.options['batch_size']))
             for seq, payload in cursor:
                 item = b'{"record":' + payload + b',"seq":' + str(seq).encode('ascii') + b'}'
                 size += len(item) + bool(rows)
@@ -189,7 +194,7 @@ class Spool:
                 payload_bytes += len(payload)
                 last = seq
             if rows:
-                self.sent_range = (self.ack, last, payload_bytes)
+                self.sent_range = (max(self.ack,after), last, payload_bytes)
         return prefix + b','.join(rows) + suffix if rows else b''
 
     def pending(self):
@@ -209,6 +214,7 @@ class Spool:
                 released = self.db.execute('SELECT coalesce(sum(length(cast(payload AS BLOB))),0) FROM items WHERE seq<=?', (sequence,)).fetchone()[0]
             with self.db:
                 self.db.execute('DELETE FROM items WHERE seq<=?', (sequence,))
+                self.db.execute('DELETE FROM pending_ranges WHERE block<=? AND last<=?',(sequence//1024,sequence))
                 self.db.execute('UPDATE state SET ack=? WHERE id=1', (sequence,))
                 self.save_usage(self.written, sequence, self.bytes - released)
             self.sent_range = None
@@ -243,18 +249,19 @@ CREATE TABLE IF NOT EXISTS inputs(worker TEXT PRIMARY KEY,cursor INTEGER NOT NUL
 CREATE TABLE IF NOT EXISTS seen(seq INTEGER PRIMARY KEY,feed INTEGER,ident BLOB,digest BLOB,strong INTEGER,received INTEGER);
 CREATE TABLE IF NOT EXISTS feed_names(id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE);
 CREATE INDEX IF NOT EXISTS event_lookup ON seen(feed,ident,digest);
-CREATE TABLE IF NOT EXISTS observations(seq INTEGER,worker TEXT,session TEXT,observed REAL,PRIMARY KEY(seq,worker));
-CREATE INDEX IF NOT EXISTS recent_observation ON observations(worker,observed);
 CREATE TABLE IF NOT EXISTS outbox(seq INTEGER PRIMARY KEY,payload TEXT);
 CREATE TABLE IF NOT EXISTS output(id INTEGER PRIMARY KEY,seq INTEGER,written INTEGER,path TEXT,offset INTEGER,opened REAL);
 INSERT OR IGNORE INTO output VALUES(1,0,0,NULL,0,0);
 CREATE TABLE IF NOT EXISTS notices(id INTEGER PRIMARY KEY AUTOINCREMENT,level TEXT,body TEXT);
 CREATE TABLE IF NOT EXISTS worker_state(worker TEXT PRIMARY KEY,status TEXT,updated REAL);
-CREATE TABLE IF NOT EXISTS markers(worker TEXT,feed TEXT,session TEXT,u INTEGER,PRIMARY KEY(worker,feed));
+CREATE TABLE IF NOT EXISTS markers(worker TEXT,feed TEXT,session TEXT,u INTEGER,PRIMARY KEY(worker,feed,session));
 CREATE TABLE IF NOT EXISTS gaps(worker TEXT,feed TEXT,start_u INTEGER,end_u INTEGER,created REAL,resolved INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS edges(seq INTEGER PRIMARY KEY,feed TEXT,u INTEGER,previous INTEGER,first INTEGER,reset INTEGER);
 CREATE INDEX IF NOT EXISTS edge_lookup ON edges(feed,u);
-CREATE TABLE IF NOT EXISTS conflicts(feed TEXT,created REAL,seq INTEGER);
+CREATE TABLE IF NOT EXISTS conflicts(feed TEXT,created REAL,seq INTEGER,variant_seq INTEGER,category TEXT);
+CREATE INDEX IF NOT EXISTS conflict_feed_time ON conflicts(feed,created);
+CREATE TABLE IF NOT EXISTS session_faults(worker TEXT,feed TEXT,session TEXT,reason TEXT,created REAL,
+ PRIMARY KEY(worker,feed)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS totals(name TEXT PRIMARY KEY,value INTEGER);
 CREATE TABLE IF NOT EXISTS snapshot_requests(gap INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS variants(seq INTEGER PRIMARY KEY,digest TEXT,category TEXT);
@@ -263,6 +270,11 @@ CREATE INDEX IF NOT EXISTS segment_cursor ON segments(last_seq);
 CREATE INDEX IF NOT EXISTS raw_compression_queue ON segments(first_seq) WHERE compressed=0;
 CREATE TABLE IF NOT EXISTS maintenance(name TEXT PRIMARY KEY,value TEXT);
 '''
+
+
+from .evidence import Evidence
+from .cold import ColdIndex, HistoryUnavailable
+from . import receipts, pending_ranges
 
 
 class MergeStore:
@@ -277,9 +289,13 @@ class MergeStore:
         self.db.execute('PRAGMA cache_size=-65536')
         self.db.executescript(SCHEMA); self.counters = {}; self.metrics = {}
         self.samples = defaultdict(lambda: deque(maxlen=4 * self.options['match_events']))
+        self.evidence = Evidence(self.db)
+        self.decoder = Decoder()
+        self.db.executescript(receipts.SCHEMA)
+        self.cold = ColdIndex(self.db,self.root,config['family'])
         self.prepare_keys()
         self.recover_output(); self.flush()
-        self.archive = IndexArchive(self.db, self.root)
+        self.archive = IndexArchive(self.db, self.root, self.evidence)
         self.register_segments()
 
     def prepare_keys(self):
@@ -315,7 +331,7 @@ class MergeStore:
 
     def observed_feeds(self):
         # 歷史與熱索引共用永久來源字典；僅回報真的有行情的來源。
-        query = 'SELECT DISTINCT feed FROM seen UNION SELECT DISTINCT feed FROM archive.seen'
+        query = 'SELECT DISTINCT feed FROM seen UNION SELECT DISTINCT feed FROM archive.seen UNION SELECT DISTINCT feed FROM cold_keys'
         if self.compact:
             query = f'SELECT name FROM feed_names WHERE id IN ({query})'
         return {row[0] for row in self.db.execute(query)}
@@ -323,14 +339,14 @@ class MergeStore:
     def register_segments(self):
         # 舊版本只在首次升級時掃描封存段；之後 CSV 直接查詢持久目錄。
         if self.db.execute("SELECT 1 FROM maintenance WHERE name='segment_catalog'").fetchone(): return
-        names = sorted({p.name.removesuffix('.gz') for p in (self.root / 'raw').glob('*.jsonl*')
-                        if p.name.endswith(('.jsonl', '.jsonl.gz'))})
+        names = sorted({name.removesuffix('.gz') for name in disk_names(self.root, '*.jsonl*')
+                        if name.endswith(('.jsonl', '.jsonl.gz'))}, key=first_seq)
         active, written = self.db.execute('SELECT path,written FROM output').fetchone()
-        end = int(Path(active).name.split('_')[0]) - 1 if active else written
+        end = first_seq(active) - 1 if active else written
         with self.db:
             for index, name in enumerate(names):
-                last = int(names[index + 1].split('_')[0]) - 1 if index + 1 < len(names) else end
-                self.db.execute('INSERT OR IGNORE INTO segments(name,first_seq,last_seq) VALUES(?,?,?)', (name, int(name.split('_')[0]), last))
+                last = first_seq(names[index + 1]) - 1 if index + 1 < len(names) else end
+                self.db.execute('INSERT OR IGNORE INTO segments(name,first_seq,last_seq) VALUES(?,?,?)', (name, first_seq(name), last))
             self.db.execute("INSERT INTO maintenance VALUES('segment_catalog','1')")
 
     def recover_output(self):
@@ -345,9 +361,10 @@ class MergeStore:
             if offset: raise StorageError('committed JSONL missing')
             return
         if sealed.stat().st_size != offset: raise StorageError('sealed JSONL size mismatch')
+        sync_directory(sealed.parent)
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO segments(name,first_seq,last_seq) VALUES(?,?,?)',
-                            (sealed.name, int(sealed.name.split('_')[0]), written))
+                            (sealed.relative_to(self.root / 'raw').as_posix(), first_seq(sealed), written))
             self.db.execute('UPDATE output SET path=NULL,offset=0 WHERE id=1')
 
     def notice(self, event, **fields):
@@ -384,11 +401,7 @@ class MergeStore:
                 self.sequence = self.db.execute('SELECT seq FROM output').fetchone()[0]
                 self.db.execute('INSERT OR IGNORE INTO inputs VALUES(?,0)', (worker,))
                 cursor = self.db.execute('SELECT cursor FROM inputs WHERE worker=?', (worker,)).fetchone()[0]
-                for item in batch:
-                    if item['seq'] <= cursor: continue
-                    if item['seq'] != cursor + 1: raise ValueError('worker input sequence gap')
-                    self.consume(worker, item['record'])
-                    cursor = item['seq']
+                cursor = receipts.process(self,worker,batch,cursor)
                 self.db.execute('UPDATE inputs SET cursor=? WHERE worker=?', (cursor, worker))
                 self.db.execute('UPDATE output SET seq=? WHERE id=1', (self.sequence,))
             indexed = time.monotonic()
@@ -400,16 +413,24 @@ class MergeStore:
                                 persist_ms=round((flushed-indexed)*1000, 3), batch_ms=round((time.monotonic()-started)*1000, 3))
             return cursor
         except (OSError, sqlite3.Error) as exc:
+            self.evidence.cache.clear()
             raise StorageError(str(exc)) from exc
+        except Exception:
+            self.evidence.cache.clear()
+            raise
 
     def consume(self, worker, record):
         # 連線事件只進狀態日誌；正式輸出只包含原生行情及 REST 回應。
         if record.get('kind') == 'event':
+            if record.get('event') in ('disconnected','connect_attempt','ws_rate_limited'):
+                self.db.execute('INSERT INTO transport_log(worker,feed,event,details,received) VALUES(?,?,?,?,?)',
+                                (worker,key(record),record['event'],stable_json(record.get('details',{})),record['local_timestamp']))
             self.notice(record.get('event', 'worker_event'), worker=worker,
                         feed=key(record), details=record.get('details', {}))
             return
-        try: events = atoms(record)
+        try: events = self.decoder.events(record)
         except (ValueError, KeyError, TypeError) as exc:
+            self.session_fault(worker,record,'invalid_payload')
             self.notice('invalid_payload', worker=worker, feed=key(record), reason=str(exc))
             self.stage(dict(record, identity_unverified=True, validation_error=str(exc)))
             return
@@ -427,7 +448,14 @@ class MergeStore:
                                    (feed_id, ident))
             for sequence, digest in rows:
                 if digest == fingerprint: return sequence, None
-                if conflict is None: conflict = (sequence,)
+                if conflict is None: conflict = []
+                conflict.append(sequence)
+        for sequence, digest in self.cold.lookup(feed_id,ident):
+            if digest == fingerprint:
+                return sequence, None
+            if conflict is None:
+                conflict = []
+            conflict.append(sequence)
         return None, conflict
 
     def merge(self, worker, event):
@@ -437,6 +465,7 @@ class MergeStore:
         ident, digest = self.packed_key(event['ident']), self.packed_key(event['digest'])
         existing, conflict = self.identities(event['strong'], feed_id, ident, digest)
         if not event['strong']: record = dict(record, identity_unverified=True)
+        duplicate = existing is not None
         if existing is None:
             if not event['strong']:
                 self.db.execute("INSERT INTO totals VALUES('identity_unverified',1) ON CONFLICT(name) DO UPDATE SET value=value+1")
@@ -445,13 +474,13 @@ class MergeStore:
                 merged = dict(event, record=dict(record, session='merged'))
                 self.observe_marker('__merged__', merged)
             if conflict:
-                category = self.variant_category(event, conflict[0])
-                self.notice('content_conflict', worker=worker, feed=feed, previous_seq=conflict[0], category=category)
+                category = self.classify_conflict(worker,feed,conflict,event)
                 record = dict(record, conflict_category=category)
-                self.db.execute('INSERT INTO conflicts VALUES(?,?,?)', (feed, time.time(), conflict[0]))
             existing = self.stage(record, bool(conflict))
             self.db.execute('INSERT INTO seen VALUES(?,?,?,?,?,?)',
                             (existing, feed_id, ident, digest, event['strong'], record['local_timestamp']))
+            if conflict:
+                self.db.executemany('INSERT OR IGNORE INTO protected_seq VALUES(?)', [(n,) for n in [existing,*conflict]])
             if event.get('variant'):
                 v = event['variant']; self.db.execute('INSERT INTO variants VALUES(?,?,?)', (existing, v['digest'], v['category']))
             if event['marker']:
@@ -461,14 +490,28 @@ class MergeStore:
         elif event['strong']:
             # 只抽取已遇過的序號；監測另以已提交的兩個 session 觀察列核實。
             self.samples[feed].append(existing)
-        self.db.execute('INSERT OR IGNORE INTO observations VALUES(?,?,?,?)',
-                        (existing, worker, record.get('session', ''), time.time()))
+        self.evidence.record(existing, worker, event, feed_id, self.input_seq, duplicate)
+
+    def classify_conflict(self, worker, feed, versions, event):
+        # 同一 ID 可能已有多個變體；任何相符的內容基線都能辨認發布欄位差異。
+        for previous in versions:
+            category = self.variant_category(event,previous)
+            if category != 'native_content_conflict':
+                break
+        self.notice('content_conflict',worker=worker,feed=feed,previous_seq=previous,category=category)
+        self.db.execute('INSERT INTO conflicts VALUES(?,?,?,?,?)',(feed,time.time(),previous,self.sequence+1,category))
+        return category
 
     def variant_category(self, event, previous):
         # 舊索引沒有分類指紋時仍視為一般衝突，不推測未保存的欄位。
         variant = event.get('variant')
         old = self.db.execute('SELECT digest,category FROM variants WHERE seq=?', (previous,)).fetchone()
         if not old: old = self.db.execute('SELECT digest,category FROM archive.variants WHERE seq=?', (previous,)).fetchone()
+        if variant and not old and self.cold.possible(self.feed_key(key(event['record'])),self.packed_key(event['ident']))[1]:
+            try:
+                old = self.cold.connect().execute('SELECT digest,category FROM variants WHERE seq=?',(previous,)).fetchone()
+            except (OSError,sqlite3.Error) as exc:
+                raise HistoryUnavailable(str(exc)) from exc
         if variant and old and old[0] == variant['digest']: return variant['category']
         return 'native_content_conflict'
 
@@ -482,47 +525,77 @@ class MergeStore:
         self.db.execute('INSERT INTO outbox VALUES(?,?)', (sequence, stable_json(clean)))
         return sequence
 
+    def session_fault(self,worker,record,reason):
+        # 群組仍在收訊時也能回報原生序號或解析異常，交接只針對同一實際會話。
+        if worker!='__merged__' and record.get('kind')=='ws':
+            self.db.execute('INSERT OR REPLACE INTO session_faults VALUES(?,?,?,?,?)',
+                            (worker,key(record),record.get('session',''),reason,time.time()))
+
     def observe_marker(self, worker, event):
         # 只使用 adapter 宣告的前序規則；不建立訂單簿或推測無連續語義的 ID。
         marker = event['marker']
         if marker is None: return
         record = event['record']; feed = key(record); session = record.get('session', '')
-        old = self.db.execute('SELECT session,u FROM markers WHERE worker=? AND feed=?', (worker, feed)).fetchone()
+        old = self.db.execute('SELECT session,u FROM markers WHERE worker=? AND feed=? AND session=?', (worker, feed,session)).fetchone()
         if worker == '__merged__' and old and event['snapshot']: return
         if old and old[0] == session and not marker['reset'] and marker['u'] > old[1]:
             gap = marker['previous'] is not None and marker['previous'] != old[1]
             if marker['previous'] is None and marker['first'] is not None: gap = marker['first'] > old[1] + 1
             if gap:
+                self.session_fault(worker,record,'sequence_gap')
                 self.db.execute('INSERT INTO gaps(worker,feed,start_u,end_u,created) VALUES(?,?,?,?,?)',
                                 (worker, feed, old[1], marker['u'], time.time()))
                 self.notice('worker_sequence_gap', worker=worker, feed=feed, previous=old[1], current=marker['u'])
         if not old or old[0] != session or marker['reset'] or marker['u'] > old[1]:
             self.db.execute('INSERT OR REPLACE INTO markers VALUES(?,?,?,?)', (worker, feed, session, marker['u']))
 
-    def output_path(self):
-        # 先建立可恢復的檔名與偏移；崩潰後截掉未提交尾部再重寫 outbox。
-        _, written, path, offset, opened = self.db.execute('SELECT seq,written,path,offset,opened FROM output').fetchone()
-        if path and not (self.root / path).exists() and (self.root / path).with_suffix('').exists():
-            with self.db: self.db.execute('UPDATE output SET path=NULL,offset=0 WHERE id=1')
+    def output_path(self, day, received):
+        # 目錄依原始接收日分開，檔名的序號仍沿用全 run 提交順序。
+        self.recover_output()
+        written, path, offset, opened = self.db.execute('SELECT written,path,offset,opened FROM output').fetchone()
+        if path and (Path(path).parent.name != day or time.time() - opened >= self.options['segment_seconds']):
+            self.seal()
             path = None
-        if path and time.time() - opened >= self.options['segment_seconds']:
-            self.seal(); path = None
         if not path:
-            path = f'raw/{written + 1:012d}_{utc(time.time_ns() // 1000, "%Y-%m-%dT%H%M%S")}.jsonl.part'
+            directory = self.root / 'raw' / day
+            if not directory.exists():
+                directory.mkdir()
+                sync_directory(directory.parent)
+            name = f'{written + 1:012d}_{utc(received, "%Y-%m-%dT%H%M%S")}.jsonl.part'
+            path = f'raw/{day}/{name}'
             with self.db:
                 self.db.execute('UPDATE output SET path=?,offset=0,opened=? WHERE id=1', (path, time.time()))
             offset = 0
         return self.root / path, offset
 
     def flush(self):
-        # 先 fsync JSONL，再提交檔案偏移及刪除暫存 payload；此後才允許 ACK。
-        rows = self.db.execute('SELECT seq,payload FROM outbox ORDER BY seq').fetchall()
-        if not rows: return
-        path, offset = self.output_path()
-        with path.open('r+b' if path.exists() else 'w+b') as handle:
+        # 即使單批跨日或交錯遲到，每個已發布分段也只能含一個接收日。
+        query = ('SELECT o.seq,o.payload,s.received FROM outbox o LEFT JOIN seen s ON s.seq=o.seq ORDER BY o.seq')
+        rows = self.db.execute(query).fetchall()
+        for _, group in groupby(rows, key=self.receive_day_number):
+            batch = list(group)
+            received = self.receive_time(batch[0])
+            self.write_segment(batch, utc(received), received)
+
+    @staticmethod
+    def receive_time(row):
+        # 若去重索引已封存，待交付原文仍足以復原其接收時間。
+        return row[2] if row[2] is not None else json.loads(row[1])['local_timestamp']
+
+    def receive_day_number(self, row):
+        # 以整數微秒切在 UTC 午夜，正常高流量路徑無須逐筆格式化日期。
+        return self.receive_time(row) // 86_400_000_000
+
+    def write_segment(self, rows, day, received):
+        # 每組先同步 JSONL 再更新偏移；跨日寫入失敗時可從剩餘 outbox 接續。
+        path, offset = self.output_path(day, received)
+        exists = path.exists()
+        with path.open('r+b' if exists else 'w+b') as handle:
             handle.truncate(offset); handle.seek(offset)
-            for _, payload in rows: handle.write((payload + '\n').encode())
+            for _, payload, _ in rows: handle.write((payload + '\n').encode())
             handle.flush(); os.fsync(handle.fileno()); position = handle.tell()
+        if not exists:
+            sync_directory(path.parent)
         with self.db:
             self.db.execute('UPDATE output SET written=?,offset=? WHERE id=1', (rows[-1][0], position))
             self.db.execute('DELETE FROM outbox WHERE seq<=?', (rows[-1][0],))
@@ -530,7 +603,8 @@ class MergeStore:
     def sealed_cursor(self):
         # 靜默期間仍封存已到期的最後一段，按需匯出不必等待下一筆行情。
         path, opened = self.db.execute('SELECT path,opened FROM output').fetchone()
-        if path and time.time() - opened >= self.options['segment_seconds']:
+        if path and (time.time() - opened >= self.options['segment_seconds'] or
+                     Path(path).parent.name != utc(time.time_ns() // 1000)):
             self.seal()
         return self.db.execute('SELECT coalesce(max(last_seq),0) FROM segments').fetchone()[0]
 
@@ -539,15 +613,23 @@ class MergeStore:
         path, offset = self.db.execute('SELECT path,offset FROM output').fetchone()
         if not path: return
         target = self.root / path
-        if target.exists():
-            with target.open('r+b') as handle:
-                handle.truncate(offset); handle.flush(); os.fsync(handle.fileno())
-            os.replace(target, target.with_suffix(''))
-            sync_directory(target.parent)
+        if not offset:
+            # 開檔後首批尚未提交，不發布空段或未確認的尾端。
+            target.unlink(missing_ok=True)
+            with self.db:
+                self.db.execute('UPDATE output SET path=NULL,offset=0 WHERE id=1')
+            return
+        if not target.exists():
+            self.recover_output()
+            return
+        with target.open('r+b') as handle:
+            handle.truncate(offset); handle.flush(); os.fsync(handle.fileno())
+        os.replace(target, target.with_suffix(''))
+        sync_directory(target.parent)
         with self.db:
             written = self.db.execute('SELECT written FROM output').fetchone()[0]
-            name = target.with_suffix('').name
-            self.db.execute('INSERT OR IGNORE INTO segments(name,first_seq,last_seq) VALUES(?,?,?)', (name, int(name.split('_')[0]), written))
+            name = target.with_suffix('').relative_to(self.root / 'raw').as_posix()
+            self.db.execute('INSERT OR IGNORE INTO segments(name,first_seq,last_seq) VALUES(?,?,?)', (name, first_seq(name), written))
             self.db.execute('UPDATE output SET path=NULL,offset=0 WHERE id=1')
 
     def cursor(self, worker):
@@ -558,3 +640,5 @@ class MergeStore:
     def close(self):
         # 正常停止時完成最後一段，保留索引讓下一個 supervisor 接續。
         self.flush(); self.seal(); self.drain_notices(); self.db.close()
+        if self.cold.remote:
+            self.cold.remote.close()

@@ -1,4 +1,5 @@
 """已提交資料的無損封存；歷史去重證據不設刪除期限。"""
+from common.segments import checksum
 import gzip
 import hashlib
 import os
@@ -42,8 +43,11 @@ def compress_ready(root, limit=8):
         names = db.execute('SELECT name FROM segments WHERE compressed=0 ORDER BY first_seq LIMIT ?', (limit,)).fetchall()
         for (name,) in names:
             compress_segment(Path(root) / 'raw' / name)
+            zipped = Path(root)/'raw'/(name+'.gz')
+            digest = checksum(zipped)
             with db:
                 db.execute('UPDATE segments SET compressed=1 WHERE name=?', (name,))
+                db.execute('UPDATE sealed_at SET bytes=?,digest=? WHERE name=?',(zipped.stat().st_size,digest,name))
         return len(names)
     finally:
         db.close()
@@ -51,27 +55,44 @@ def compress_ready(root, limit=8):
 
 class IndexArchive:
     """熱索引有界搬移至歷史索引；遲到副本仍可查證，不用 TTL 忽略事件。"""
-    tables = ('seen', 'observations', 'edges', 'variants')
+    tables = ('seen', 'edges', 'variants')
 
-    def __init__(self, db, root):
+    def __init__(self, db, root, evidence):
         # 複製與刪除分成兩次耐久交易，跨資料庫崩潰最多留下重複索引。
         self.db = db
+        self.evidence = evidence
+        self.root = Path(root)
         db.execute('ATTACH DATABASE ? AS archive', (str(Path(root) / '_state' / 'index_archive.sqlite'),))
         db.execute('PRAGMA archive.journal_mode=WAL'); db.execute('PRAGMA archive.synchronous=FULL')
         db.execute('PRAGMA archive.cache_size=-8192')
         with db:
             for table in self.tables:
                 db.execute(f'CREATE TABLE IF NOT EXISTS archive.{table} AS SELECT * FROM main.{table} WHERE 0')
-                keys = 'seq,worker' if table == 'observations' else 'seq'
+                keys = 'seq'
                 db.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS archive.{table}_key ON {table}({keys})')
             db.execute('CREATE INDEX IF NOT EXISTS archive.event_lookup ON seen(feed,ident,digest)')
             db.execute('CREATE INDEX IF NOT EXISTS archive.edge_lookup ON edges(feed,u)')
         db.execute('CREATE TEMP VIEW IF NOT EXISTS all_edges AS SELECT * FROM main.edges UNION SELECT * FROM archive.edges')
         self.has_seen = bool(db.execute('SELECT 1 FROM archive.seen LIMIT 1').fetchone())
 
+    def holds(self,cutoff):
+        # 只有實際到期的明細才讀取各副本的交付區間。
+        if not self.db.execute('SELECT 1 FROM observations WHERE observed<? LIMIT 1',(cutoff,)).fetchone():
+            return
+        from .pending_ranges import collect
+        ranges = collect(self.root/'_spool',cutoff)
+        if not ranges and not self.db.execute('SELECT 1 FROM pending_evidence LIMIT 1').fetchone():
+            return
+        with self.db:
+            self.db.execute('DELETE FROM pending_evidence')
+            self.db.executemany('INSERT INTO pending_evidence SELECT id,?,? FROM feed_names WHERE name=?',
+                                [(first-5,last+5,name) for name,first,last in ranges])
+
     def move(self, seconds, limit=2000):
         # 每輪只處理有限索引頁；最近觀察過或尚未落盤的事件保留於熱區。
         cutoff = time.time() - seconds
+        evidence_cutoff = time.time()-86400
+        self.holds(evidence_cutoff)
         self.db.execute('CREATE TEMP TABLE IF NOT EXISTS moving(seq INTEGER PRIMARY KEY)')
         written = self.db.execute('SELECT written FROM output').fetchone()[0]
         with self.db:
@@ -85,14 +106,10 @@ class IndexArchive:
             self.db.execute('INSERT INTO moving SELECT seq FROM seen WHERE seq>? AND seq<=? AND received<?',
                             (floor, upper, cutoff * 1e6))
             self.scanned = upper if floor < upper < self.scan_end else 0
-            # 封存後新到的跨路觀察仍須保存；排除仍有近期觀察的整個事件。
-            self.db.execute("""INSERT OR IGNORE INTO moving SELECT DISTINCT o.seq FROM observations o
-                WHERE o.seq < coalesce((SELECT min(seq) FROM seen),?) AND o.observed<? LIMIT ?""",
-                            (written + 1, cutoff, limit))
-            self.db.execute("""DELETE FROM moving WHERE EXISTS (SELECT 1 FROM observations o
-                WHERE o.seq=moving.seq AND o.observed>=?)""", (cutoff,))
         count = self.db.execute('SELECT count(*) FROM moving').fetchone()[0]
         if not count:
+            with self.db:
+                self.evidence.summarize(evidence_cutoff, limit)
             return 0
         # 兩次耐久交易保留原有崩潰邊界；採集合併持鎖期間每表各做一次集合操作。
         with self.db:
@@ -100,7 +117,9 @@ class IndexArchive:
                 self.db.execute(f'INSERT OR IGNORE INTO archive.{table} SELECT * FROM main.{table} WHERE seq IN moving')
         self.has_seen = True
         with self.db:
+            self.evidence.summarize(evidence_cutoff, limit)
+            # 事故範圍保留在熱盤，供後續保護判斷與查詢。
+            self.db.execute('DELETE FROM moving WHERE seq IN (SELECT seq FROM observations)')
             for table in self.tables:
                 self.db.execute(f'DELETE FROM main.{table} WHERE seq IN moving')
-            self.db.execute('DELETE FROM conflicts WHERE rowid IN (SELECT rowid FROM conflicts WHERE created<? LIMIT ?)', (cutoff, limit))
         return count

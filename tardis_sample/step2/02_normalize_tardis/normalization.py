@@ -1,18 +1,25 @@
 """第 02 階段共用的離線重播、版本追蹤、價位索引與 CSV 輸出。"""
-import argparse
-from collections import Counter, OrderedDict
+from collections import OrderedDict
+from contextlib import closing
 import csv
 import hashlib
 import heapq
+from datetime import datetime, timezone
 from importlib import import_module
 import json
+import os
 from pathlib import Path
 import sqlite3
-from common import SCHEMAS, LOG, STEP2_ROOT, atomic_json, configure_logging, dec, encode, utc
-from common.raw_reader import read_records, read_runs, check_count
+import sys
+from common import SCHEMAS, LOG, STEP2_ROOT, atomic_json, dec, encode, utc
+from common.raw_reader import read_runs, check_count
+from common.segments import utc_day
+from .replay_input import RunReader
+from .replay_report import ReplayJournal
 
-COMMIT = 'a6b0cfa0848fa2a8b0b46a10b25a1427ce944c73'
+COMMIT = 'b75d1c5788c1724dbc6b73be0e1db2a158f93f57'
 REFERENCE_MAPPER = {'binance': 'binance', 'bybit': 'bybit', 'okx': 'okex', 'coinbase': 'coinbase', 'upbit': 'upbit'}
+DEFAULT_BATCH_SIZE = 4096
 
 
 def reference_metadata(family):
@@ -24,7 +31,8 @@ def reference_metadata(family):
         paths.append('src/handy.ts')
     sources = {Path(p).name: {'url': f'https://github.com/tardis-dev/tardis-node/blob/{COMMIT}/{p}',
                               'sha256': digest(root / 'reference' / Path(p).name)} for p in paths}
-    local = [root / '02_normalize_tardis.py', root / 'normalization.py', root / 'mappers' / f'{family}.py',
+    local = [root / '02_normalize_tardis.py', root / 'normalization.py', root / 'replay_cli.py',
+             root / 'replay_input.py', root / 'replay_report.py', root / 'mappers' / f'{family}.py',
              *(STEP2_ROOT / 'common').glob('*.py')]
     if family != 'binance':
         local.append(root / 'market_mapping.py')
@@ -75,32 +83,40 @@ class Side:
 
 
 class Output:
-    def __init__(self, root, types):
+    def __init__(self, root, types, journal):
         # 限制同時開啟的檔案數，每家只建立其市場支援的表格。
         self.root = root
         self.types = types
         self.open = OrderedDict()
-        self.created = set()
-        self.counts = Counter()
-        self.ranges = {}
+        self.groups = OrderedDict()
+        self.pending = {}
+        self.total = 0
+        self.journal = journal
 
     def ensure(self, market, symbol, day):
         # 先建立當日表頭，讓有採集來源但未發生清算的日期仍有清算檔案。
+        key = market, symbol, day
+        if key in self.groups:
+            self.groups.move_to_end(key)
+            return
         for target in self.types[market]:
             rel = f'{market}/{target}/{day}_{symbol}.csv'
-            if rel in self.created:
-                continue
             path = self.root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open('x', newline='', encoding='utf-8') as handle:
+            try:
+                handle = path.open('x', newline='', encoding='utf-8')
+            except FileExistsError:
+                continue
+            with handle:
                 csv.writer(handle).writerow(SCHEMAS[target])
-            self.created.add(rel)
+        self.groups[key] = None
+        if len(self.groups) > 128:
+            self.groups.popitem(last=False)
 
-    def write(self, target, row):
+    def write(self, target, row, day):
         # 依事件時間分檔，保留十進位精度，並分別記下最早及最晚時間。
         market, symbol = row['exchange'], row['symbol']
         timestamp = row['timestamp']
-        day = utc(timestamp)
         self.ensure(market, symbol, day)
         rel = f'{market}/{target}/{day}_{symbol}.csv'
         if rel not in self.open:
@@ -110,14 +126,29 @@ class Output:
             self.open[rel] = handle, csv.DictWriter(handle, fieldnames=SCHEMAS[target])
         self.open.move_to_end(rel)
         self.open[rel][1].writerow({k: encode(row.get(k)) for k in SCHEMAS[target]})
-        self.counts[rel] += 1
-        low, high = self.ranges.get(rel, (timestamp, timestamp))
-        self.ranges[rel] = min(low, timestamp), max(high, timestamp)
+        count, low, high = self.pending.get(rel, (0, timestamp, timestamp))
+        self.pending[rel] = count + 1, min(low, timestamp), max(high, timestamp)
+        self.total += 1
+        if len(self.pending) >= 128:
+            self.flush_counts()
+
+    def flush_counts(self):
+        # 將已用完的逐檔統計寫到磁碟；活躍簿及成交去重由 mapper 獨立保留。
+        self.journal.save_counts(self.pending)
+        self.pending.clear()
 
     def close(self):
         # 將所有剩餘輸出緩衝寫入磁碟。
-        for handle, _ in self.open.values():
-            handle.close()
+        error = None
+        while self.open:
+            handle, _ = self.open.popitem()[1]
+            try:
+                handle.close()
+            except OSError as exc:
+                error = exc
+        self.flush_counts()
+        if error:
+            raise error
 
 
 def check_markets(markets, mapper):
@@ -133,76 +164,170 @@ def in_window(timestamp, start, end):
 
 
 def replay_run(root, manifest, mapper, writer, options, report):
-    # 逐筆讀取提交順序，先更新狀態，再以事件時間篩選待寫列。
-    recover, start, end = options
-    warnings = report['recovery_warnings']
-    count = 0
+    # 每批只提交去重及報告索引，保留兩批邊界上的有效行情狀態。
+    recover, start, end, batch_size = options
+    journal = writer.journal
+    journal.started(root, manifest)
     mapper.reset()
-    report['inputs'].append({'run': str(root), 'manifest_status': manifest['status'],
-                             'health': manifest.get('health_at_stop')})
-    for record in read_records(root, recover, warnings):
-        market, symbol = record['exchange'], record['symbol']
-        if market:
-            check_markets([market], mapper)
-        local = record['local_timestamp']
-        if symbol and market and in_window(local, start, end):
-            writer.ensure(market, symbol, utc(local))
-        for target, row in mapper.consume(record):
-            if in_window(row['timestamp'], start, end):
-                writer.write(target, row)
-        count += 1
-        report['raw_records'] += 1
-        if count % 10000 == 0:
-            mapper.db.commit()
-        if count % 100000 == 0:
-            LOG.info('event=normalization_progress raw_records=%s csv_rows=%s', count, sum(writer.counts.values()))
-    check_count(root, manifest, count, recover, warnings)
+    reader = RunReader(root, manifest, mapper.db, journal, mapper.reset, recover, batch_size)
+    mapper.on_invalid = reader.invalid_payload
+    try:
+        count = consume_run(reader, mapper, writer, start, end, batch_size, report)
+    finally:
+        mapper.on_invalid = None
+    check_count(root, manifest, count, True, journal)
+    mapper.reset()
+    writer.flush_counts()
+    mapper.db.commit()
+    journal.db.commit()
     LOG.info('event=normalization_run_complete run=%s raw_records=%s', root, count)
 
 
-def replay(mapper_class, source, output, recover=False, start=None, end=None):
-    # 限定交易所並依批次起始時間重播，各批次重新等待該市場的快照。
-    warnings = []
-    runs = sorted(read_runs(source, recover, warnings), key=lambda item: item[1]['started_us'])
-    previous_end = None
-    for _, manifest in runs:
+def consume_run(reader, mapper, writer, start, end, batch_size, report):
+    # 逐筆消費，每批清空統計暫存；產生器關閉時釋放檔案與 SQLite 讀取游標。
+    count = 0
+    with closing(reader.records()) as records:
+        for record in records:
+            consume_record(record, mapper, writer, reader, start, end)
+            count += 1
+            report['raw_records'] += 1
+            if count % batch_size == 0:
+                writer.flush_counts()
+                mapper.db.commit()
+                writer.journal.db.commit()
+            if count % 100000 == 0:
+                LOG.info('event=normalization_progress run=%s raw_records=%s csv_rows=%s', reader.root, count, writer.total)
+    return count
+
+
+def consume_record(record, mapper, writer, reader, start, end):
+    # 跨市場的批次仍是輸入配置錯誤；行情缺欄逐筆記錄，輸出錯誤則向上回報。
+    market, symbol = record['exchange'], record['symbol']
+    if market and market not in mapper.types:
+        check_markets([market], mapper)
+    local = record['local_timestamp']
+    if symbol and market and in_window(local, start, end):
+        try:
+            local_day = utc(local)
+        except (OverflowError, ValueError, OSError) as exc:
+            reader.issue('invalid local_timestamp', **reader.position, detail=str(exc))
+            return
+        writer.ensure(market, symbol, local_day)
+    try:
+        rows = mapper.consume(record)
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError, OverflowError) as exc:
+        reader.issue('invalid mapper input', **reader.position, detail=str(exc))
+        return
+    for target, row in rows:
+        if in_window(row['timestamp'], start, end):
+            try:
+                event_day = utc(row['timestamp'])
+            except (OverflowError, ValueError, OSError) as exc:
+                reader.issue('invalid event timestamp', **reader.position, detail=str(exc))
+                continue
+            writer.write(target, row, event_day)
+
+
+def time_window(start, end, day):
+    # 省略兩端表示全量，單側限制及 UTC 日期維持原有事件時間語義。
+    if day is not None:
+        if start is not None or end is not None:
+            raise ValueError('choose --date or an explicit time window')
+        midnight = datetime.strptime(utc_day(day), '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        start = int(midnight.timestamp()) * 1_000_000
+        end = start + 86_400_000_000
+    if start is not None and end is not None and start >= end:
+        raise ValueError('invalid interval')
+    return start, end
+
+
+def invalid_payload(mapper, record, exc, item=None):
+    # mapper 可單獨使用；正式重播另將每個損壞成員的實際錯誤送進來源日誌。
+    mapper.issues['invalid_payload'] += 1
+    handler = getattr(mapper, 'on_invalid', None)
+    if handler is not None:
+        handler(record, exc, item)
+
+
+def checked_runs(source, mapper_class, recover, journal, day):
+    # 建立輸出前拒絕錯誤交易所，也保留採集鎖和即時封段檢查。
+    for candidate in run_roots(Path(source)):
+        root, manifest = next(read_runs(candidate, recover, journal, day))
         markets = manifest.get('config', {}).get('markets', [manifest['exchange']] if 'exchange' in manifest else [])
         check_markets(markets, mapper_class)
-        if previous_end is not None and manifest['started_us'] < previous_end:
-            raise ValueError('overlapping runs require explicit replica merging; unsupported')
-        previous_end = manifest.get('ended_us', manifest['started_us'])
-    metadata = reference_metadata(mapper_class.family)
-    report = dict(status='running', family=mapper_class.family, mapper_reference=metadata,
-                  source_limitations=mapper_class.limitations, inputs=[], raw_records=0,
-                  note='Replay completion and source coverage are assessed separately. See inputs and source_limitations.',
-                  start_us=start, end_us=end, recovery_warnings=warnings)
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=False)
-    report_path = output / 'normalization_report.json'
-    atomic_json(report_path, report)
-    db = sqlite3.connect(output / '.dedup.sqlite')
-    writer = Output(output, mapper_class.types)
-    mapper = mapper_class(db)
-    LOG.info('event=normalization_started input=%s output=%s runs=%s', source, output, len(runs))
+        yield root, manifest
+
+
+def run_roots(source):
+    # 根目錄也可直接是一個 run；多批次的路徑逐一加入磁碟計畫。
+    if (source / 'manifest.json').is_file():
+        yield source
+        return
+    found = False
+    if source.is_dir():
+        with os.scandir(source) as entries:
+            for entry in entries:
+                root = Path(entry.path)
+                if entry.is_dir() and (root / 'manifest.json').is_file():
+                    found = True
+                    yield root
+    if not found:
+        raise ValueError(f'no collector runs found: {source}')
+
+
+def replay(mapper_class, source, output, recover=False, start=None, end=None, day=None, *, batch_size=DEFAULT_BATCH_SIZE, result='full'):
+    # 使用磁碟暫存索引；只有需要完整回傳物件的 Python 呼叫端載入最終 JSON。
+    start, end = time_window(start, end, day)
+    if batch_size < 1:
+        raise ValueError('batch size must be positive')
+    with closing(sqlite3.connect('')) as scratch:
+        journal = ReplayJournal(scratch)
+        journal.plan(checked_runs(source, mapper_class, recover, journal, day))
+        output = Path(output)
+        report = dict(status='running', family=mapper_class.family, mapper_reference=reference_metadata(mapper_class.family),
+                      source_limitations=mapper_class.limitations, raw_records=0, utc_date=day, start_us=start, end_us=end,
+                      note='Replay completion and source coverage are assessed separately. See inputs and source_limitations.')
+        output.mkdir(parents=True, exist_ok=False)
+        path = output / 'normalization_report.json'
+        atomic_json(path, dict(report, inputs=[], recovery_warnings=[]))
+        LOG.info('event=normalization_started exchange=%s pid=%s input=%s output=%s', mapper_class.family, os.getpid(), source, output)
+        index = output / '.dedup.sqlite'
+        try:
+            with closing(sqlite3.connect(index)) as db:
+                db.execute('PRAGMA temp_store=FILE')
+                writer = Output(output, mapper_class.types, journal)
+                process_runs(mapper_class(db), writer, (recover, start, end, batch_size), report, path)
+        finally:
+            index.unlink(missing_ok=True)
+        fields = {key: report[key] for key in ('status', 'data_quality')}
+        if result == 'console':
+            journal.dump(sys.stdout, fields, summary=True)
+        if result == 'full':
+            with path.open(encoding='utf-8') as stream:
+                return json.load(stream)
+        return dict(fields, raw_records=report['raw_records'], csv_rows=writer.total, output=str(output))
+
+
+def process_runs(mapper, writer, options, report, path):
+    # 即使正常化失敗也發布已處理範圍，所有可恢復的缺失都進入品質報告。
+    journal = writer.journal
     try:
-        for root, manifest in runs:
-            replay_run(root, manifest, mapper, writer, (recover, start, end), report)
-        report['status'] = 'completed_with_warnings' if warnings else 'complete'
+        try:
+            for root, manifest in journal.runs():
+                replay_run(root, manifest, mapper, writer, options, report)
+        finally:
+            writer.close()
+        report['status'] = 'completed_with_warnings' if journal.warning_count else 'complete'
     except BaseException as exc:
         report.update(status='failed', error=f'{type(exc).__name__}: {exc}')
         raise
     finally:
-        writer.close()
-        db.close()
-        (output / '.dedup.sqlite').unlink(missing_ok=True)
-        report.update(rows=dict(writer.counts), timestamp_ranges=writer.ranges, mapper_issues=dict(mapper.issues))
-        source_issues = any((i['health'] or {}).get('data_quality') != 'healthy' for i in report['inputs'])
+        report.update(mapper_issues=dict(mapper.issues), warning_count=journal.warning_count)
         mapping_issues = set(mapper.issues).difference(('duplicate_trades', 'off_book_trades'))
-        review = warnings or source_issues or mapping_issues or report['source_limitations'] or report['status'] == 'failed'
+        review = journal.warning_count or journal.source_issues or mapping_issues or report['source_limitations'] or report['status'] == 'failed'
         report['data_quality'] = 'review_required' if review else 'no_detected_issue'
-        atomic_json(report_path, report)
-        LOG.info('event=normalization_finished status=%s rows=%s', report['status'], sum(writer.counts.values()))
-    return report
+        journal.publish(path, report)
+        LOG.info('event=normalization_finished exchange=%s status=%s rows=%s', mapper.family, report['status'], writer.total)
 
 
 def mapper_for(family):
@@ -211,17 +336,6 @@ def mapper_for(family):
 
 
 def cli():
-    # 同一入口依交易所選擇 mapper，保留離線重播與時間窗參數。
-    configure_logging()
-    parser = argparse.ArgumentParser(description='原始 JSONL 離線轉換為 Tardis CSV')
-    parser.add_argument('--exchange', required=True, choices=sorted(REFERENCE_MAPPER))
-    parser.add_argument('--input', required=True)
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--recover', action='store_true')
-    parser.add_argument('--start-us', type=int)
-    parser.add_argument('--end-us', type=int)
-    args = parser.parse_args()
-    if args.start_us is not None and args.end_us is not None and args.start_us >= args.end_us:
-        parser.error('invalid interval')
-    report = replay(mapper_for(args.exchange), args.input, args.output, args.recover, args.start_us, args.end_us)
-    print(json.dumps({k: report[k] for k in ('status', 'data_quality', 'rows')}))
+    # 保留既有入口，單家及多家共用參數與狀態規則。
+    from .replay_cli import main
+    main()

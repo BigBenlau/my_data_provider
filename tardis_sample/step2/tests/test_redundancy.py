@@ -99,7 +99,7 @@ class MergeTests(unittest.TestCase):
         left = dict(base, raw=json.dumps(dict(topic='publicTrade.BTCUSDT', type='snapshot', data=rows[:2])))
         right = dict(base, raw=json.dumps(dict(topic='publicTrade.BTCUSDT', type='snapshot', data=rows[1:])))
         send(self.store, 'a', [left]); send(self.store, 'b', [right]); self.store.seal()
-        records = [json.loads(line) for p in (self.root / 'raw').glob('*.jsonl') for line in p.read_text().splitlines()]
+        records = [json.loads(line) for p in (self.root / 'raw').rglob('*.jsonl') for line in p.read_text().splitlines()]
         self.assertEqual(len(records), 3)
         self.assertTrue(all(len(json.loads(r['raw'])['data']) == 1 and r['batch_split_version'] == 1 for r in records))
 
@@ -118,7 +118,7 @@ class MergeTests(unittest.TestCase):
         with (self.root / path).open('ab') as handle: handle.write(b'{"seq":999}\n')
         self.store.db.close(); self.store = MergeStore(self.root, self.config)
         send(self.store, 'a', [event(number=2)], 2); self.store.seal()
-        records = [json.loads(line) for p in (self.root / 'raw').glob('*.jsonl') for line in p.read_text().splitlines()]
+        records = [json.loads(line) for p in (self.root / 'raw').rglob('*.jsonl') for line in p.read_text().splitlines()]
         self.assertEqual([r['seq'] for r in records], [1, 2])
 
     def test_gap_covered_by_peer_and_uncovered_gap(self):
@@ -409,6 +409,10 @@ class DockerRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.alive('a')
             info['State'].update(Running=False, Restarting=False, ExitCode=1)
             self.assertFalse(await runtime.alive('a'))
+            info['State'].update(Running=True, ExitCode=0)
+            info['RestartCount'] = 1
+            with self.assertRaisesRegex(module.WorkerFailure, 'unexpected Docker restart'):
+                await runtime.alive('a')
             info['Image'] = 'sha256:other'
             with self.assertRaises(ValueError):
                 await runtime.alive('a')
@@ -499,7 +503,7 @@ class LocalRuntime:
     """測試直接啟動真正 Worker，只替換容器程序管理。"""
     def __init__(self, root, value):
         # 所有副本仍使用同一個 Worker 類別與同一份採集設定。
-        self.root = root; self.config = value; self.image = 'fixture-image'; self.tasks = {}
+        self.root = root; self.config = value; self.image = 'fixture-image'; self.tasks = {}; self.entries = self.tasks
 
     async def alive(self, worker):
         # 回報真實非同步任務狀態，不使用固定的健康答案。
@@ -511,6 +515,10 @@ class LocalRuntime:
         instance = Worker(self.root, self.config, worker, self.image)
         self.tasks[worker] = asyncio.create_task(instance.execute())
 
+    async def quiesce(self, worker):
+        # 模擬確認舊容器已退出，再允許對其磁碟佇列補交。
+        await self.stop(worker)
+
     async def stop(self, worker):
         # 測試結束回收所有任務並揭露失敗，不留下背景採集。
         task = self.tasks.get(worker)
@@ -521,8 +529,8 @@ class LocalRuntime:
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     """真正 Unix IPC、收訊與 supervisor 重啟的整合測試。"""
-    async def test_storage_exit_keeps_healthy_peer_ingesting_and_retains_spool(self):
-        # 一路退出 74 時另一路仍透過實際 IPC 交付；正常關停也保留故障副本的證據。
+    async def test_storage_exit_replaces_worker_and_replays_durable_spool(self):
+        # 一路退出 74 時另一路仍透過實際 IPC 交付；啟動新的副本並保留事故及補交證據。
         module = importlib.import_module("01_collector.supervisor")
         runner, port = await self.start_fixture()
         try:
@@ -533,7 +541,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 async def alive(worker):
                     # 故障副本由容器狀態回報，另一條使用真正的 worker 與行情伺服器。
                     if worker == 'failed':
-                        raise module.WorkerStorageFailure('worker=failed exit_code=74')
+                        raise module.WorkerFailure('worker=failed exit_code=74')
                     return await original_alive(worker)
                 runtime.alive = alive
                 spool = Spool(Path(root) / '_spool' / 'failed', value['redundancy'])
@@ -541,24 +549,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(adapter('binance-futures'), 'feeds', return_value=[feed]):
                     supervisor = module.Supervisor(root, value, runtime)
                     supervisor.state.update(active=['failed', 'healthy'], last_rotation=0)
-                    await supervisor.serve(.7)
-                    self.assertIsNone(supervisor.fatal)
+                    await supervisor.serve(2.2)
+                    incident = supervisor.state['storage_incidents']['failed']
+                    self.assertFalse(supervisor.stop.is_set())
                     self.assertGreater(supervisor.store.cursor('healthy'), 0)
+                    self.assertGreater(supervisor.store.cursor(incident['replacement']), 0)
+                    self.assertEqual(supervisor.store.cursor('failed'), 1)
                     self.assertNotIn('failed', runtime.tasks)
-                    self.assertIsNone(supervisor.state['candidate'])
+                    self.assertIn('recovered_us', incident)
+                    self.assertFalse((Path(root) / '_spool' / 'failed').exists())
                     supervisor.store.close(); supervisor.schedule.close()
-                self.assertEqual(json.loads((Path(root) / 'manifest.json').read_text())['status'], 'storage_blocked')
                 report = json.loads((Path(root) / 'status.json').read_text())
-                self.assertEqual(report['storage_blocked_workers'], ['failed'])
-                self.assertEqual(report['data_quality'], 'incomplete')
-                with sqlite3.connect(Path(root) / '_spool' / 'failed' / 'spool.sqlite') as db:
-                    self.assertEqual(db.execute('SELECT count(*) FROM items').fetchone()[0], 1)
-                # 即使容器暫時消失，主管重啟仍記得事故；人工恢復後再驗證交付。
+                self.assertFalse(report['storage_blocked_workers'])
+                self.assertIn('failed', report['storage_incidents'])
                 resumed = module.Supervisor(root, value, runtime)
-                runtime.alive = AsyncMock(return_value=False)
-                self.assertIsNone(await resumed.worker_alive('failed'))
-                runtime.alive.return_value = True
-                self.assertTrue(await resumed.worker_alive('failed'))
                 self.assertFalse(resumed.storage_holds())
                 resumed.store.close(); resumed.schedule.close()
         finally:

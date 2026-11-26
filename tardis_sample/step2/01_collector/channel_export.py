@@ -7,9 +7,9 @@ import io
 import json
 import os
 from pathlib import Path
-import sqlite3
 
 from common import LOG, utc
+from common.segments import catalog_entries, segment_batches, utc_day, sealed_snapshot
 from .delivery import database
 from .raw import ChannelCSV, SCHEMA_VERSION, channel_row, header
 from .retention import sync_directory
@@ -17,97 +17,16 @@ from .retention import sync_directory
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cursor(source TEXT PRIMARY KEY,seq INTEGER,rows INTEGER);
 CREATE TABLE IF NOT EXISTS files(name TEXT PRIMARY KEY,offset INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS daily_cursor(day TEXT PRIMARY KEY,seq INTEGER);
 CREATE TABLE IF NOT EXISTS days(day TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS pending(name TEXT PRIMARY KEY,offset INTEGER);
 CREATE TABLE IF NOT EXISTS recent(name TEXT PRIMARY KEY);
 """
 
 
-def archive_entries(root, cursor, last):
-    # 唯讀備份可只保留 manifest 與 JSONL；以原始起始序號及停止筆數重建目錄。
-    names = {p.name.removesuffix('.gz') for p in (root / 'raw').iterdir()
-             if p.name.endswith(('.jsonl', '.jsonl.gz'))}
-    starts = sorted((int(name.split('_')[0]), name) for name in names)
-    if (not starts and last) or (starts and (starts[0][0] != 1 or starts[-1][0] > last)):
-        raise ValueError('archive does not match stopped manifest')
-    for index, (first, name) in enumerate(starts):
-        end = starts[index + 1][0] - 1 if index + 1 < len(starts) else last
-        if end < first:
-            raise ValueError('invalid archived sequence range')
-        if end > cursor:
-            yield name, first, end
-
-
-def catalog_entries(root, cursor, last):
-    # 即時目錄固定已提交上限，跨段讀資料期間釋放讀取交易，避免阻礙 WAL。
-    db = None
-    try:
-        try:
-            uri = (root / '_state/merge.sqlite').as_uri() + '?mode=ro'
-            db = sqlite3.connect(uri, uri=True)
-            end = db.execute('SELECT coalesce(max(last_seq),0) FROM segments').fetchone()[0]
-        except sqlite3.OperationalError:
-            if last is None:
-                raise
-            # 唯讀掛載無法建立 SQLite 的 WAL 輔助檔；停止批次可直接核對封段。
-            yield from archive_entries(root, cursor, last)
-            return
-        if cursor > end or (last is not None and last != end):
-            raise ValueError('sealed catalog does not match source or export cursor')
-        while cursor < end:
-            row = db.execute('SELECT name,first_seq,last_seq FROM segments WHERE last_seq>? '
-                             'AND last_seq<=? ORDER BY last_seq LIMIT 1', (cursor, end)).fetchone()
-            if not row or not row[1] <= cursor + 1 <= row[2]:
-                raise ValueError('sealed segment catalog gap')
-            yield row
-            cursor = row[2]
-    finally:
-        if db is not None:
-            db.close()
-
-
-def source_batches(root, cursor, last):
-    # 只輸出與已提交游標相接的封段，停止批次另核對最終總數。
-    for name, first, end in catalog_entries(root, cursor, last):
-        if not first <= cursor + 1 <= end:
-            raise ValueError('archive sequence gap')
-        yield from segment_batches(root / 'raw' / name, first, end, cursor)
-        cursor = end
-    if last is not None and cursor != last:
-        raise ValueError('archive cursor does not match stopped manifest')
-
-
-def segment_batches(path, first, last, cursor):
-    # 直接開檔以容許主管同時發布 gzip；已開啟的原檔即使改名仍可讀完。
-    try:
-        source = path.open('rb')
-    except FileNotFoundError:
-        source = gzip.open(str(path) + '.gz', 'rb')
-    batch = []
-    size = 0
-    expected = first
-    with source:
-        for line in source:
-            record = json.loads(line)
-            if not line.endswith(b'\n') or record['seq'] != expected or expected > last:
-                raise ValueError('sealed JSONL sequence or line mismatch')
-            expected += 1
-            if record['seq'] <= cursor:
-                continue
-            batch.append(record)
-            size += len(line)
-            if size >= 8 * 1024**2 or len(batch) == 8192:
-                yield batch
-                batch, size = [], 0
-        if expected != last + 1:
-            raise ValueError('sealed JSONL truncated')
-        if batch:
-            yield batch
-
-
 class Exporter:
     """每次匯出只修改使用者指定的專用輸出目錄。"""
-    def __init__(self, root, output):
+    def __init__(self, root, output, day=None):
         # 以來源的封裝、建立時間及身分綁定輸出，可移動備份後接續同一批。
         self.root = Path(root).resolve()
         self.target = Path(output).resolve()
@@ -116,10 +35,13 @@ class Exporter:
         manifest = json.loads((self.root / 'manifest.json').read_text())
         if manifest.get('schema_version') != 3 or manifest.get('channel_csv_schema_version', 1) != SCHEMA_VERSION:
             raise ValueError('export-csv requires supported supervisor data; use replay for older formats')
+        self.day = utc_day(day) if day is not None else None
         self.run_id = manifest['run_id']
         self.started = manifest['started_us']
         self.config = manifest['config']
         self.source = json.dumps([self.run_id, self.started, manifest.get('identity'), self.config], sort_keys=True)
+        self.limit = sealed_snapshot(self.root, self.day) if self.day and manifest['status'] == 'running' else None
+        self.ended = manifest.get('ended_us') if manifest['status'] == 'stopped' else None
         self.last = manifest['raw_records'] if manifest['status'] == 'stopped' else None
 
     def run(self):
@@ -146,14 +68,58 @@ class Exporter:
             self.db.execute('INSERT OR IGNORE INTO cursor VALUES(?,0,0)', (self.source,))
         self.recover()
         seq, rows = self.db.execute('SELECT seq,rows FROM cursor').fetchone()
-        if not self.db.execute('SELECT 1 FROM days LIMIT 1').fetchone():
-            self.write_batch([], seq, rows, {utc(self.started)})
-        for batch in source_batches(self.root, seq, self.last):
-            seq = batch[-1]['seq']
-            rows += self.write_batch(batch, seq, rows)
+        self.ahead = dict(self.db.execute('SELECT day,seq FROM daily_cursor WHERE seq>?', (seq,)))
+        if self.day:
+            seq = max(seq, self.ahead.get(self.day, 0))
+        initial = self.day or utc(self.started)
+        if self.covers(initial) and not self.db.execute('SELECT 1 FROM days WHERE day=?', (initial,)).fetchone():
+            self.write_batch([], seq, rows, {initial})
+        seq, rows = self.export_segments(seq, rows)
         files = self.db.execute('SELECT count(*) FROM files').fetchone()[0]
-        LOG.info('event=csv_exported seq=%s rows=%s files=%s output=%s', seq, rows, files, self.target)
+        LOG.info('event=csv_exported day=%s seq=%s rows=%s files=%s output=%s', self.day, seq, rows, files, self.target)
         return dict(seq=seq, rows=rows, files=files)
+
+    def covers(self, day):
+        # 已知批次時段內的靜默日也可匯出只有表頭的每日檔案。
+        if day == utc(self.started):
+            return True
+        if self.ended is None and self.last is not None:
+            return False
+        return day >= utc(self.started) and (self.ended is None or day <= utc(self.ended))
+
+    def advance(self, seq, rows):
+        # 全批次與逐日共用同一組輸出；只有全量掃描才可推進全域序號。
+        if self.day:
+            self.db.execute('INSERT OR REPLACE INTO daily_cursor VALUES(?,?)', (self.day, seq))
+            self.db.execute('UPDATE cursor SET rows=?', (rows,))
+        else:
+            self.db.execute('UPDATE cursor SET seq=?,rows=?', (seq, rows))
+
+    def export_segments(self, seq, rows):
+        # 以目錄排除其他日期，歷史平面段則逐列篩選；提交序號前進仍會檢查全程連續。
+        for name, first, last in catalog_entries(self.root, seq, self.last, limit=self.limit, day=self.day):
+            if not first <= seq + 1 <= last:
+                raise ValueError('archive sequence gap')
+            directory = Path(name).parent.as_posix()
+            if self.day and directory not in ('.', self.day):
+                seq = last
+                continue
+            for batch in segment_batches(self.root, name, first, last, seq):
+                seq = batch[-1]['seq']
+                if self.day and directory == '.':
+                    batch = [r for r in batch if utc(r['local_timestamp']) == self.day]
+                elif not self.day and self.ahead:
+                    # 逐日先匯出的序號已在正式 CSV 中，全量追趕只補其他日期與遲交列。
+                    batch = [r for r in batch if r['seq'] > self.ahead.get(utc(r['local_timestamp']), 0)]
+                if batch:
+                    rows += self.write_batch(batch, seq, rows)
+        if self.last is not None and seq != self.last:
+            raise ValueError('archive cursor does not match stopped manifest')
+        with self.db:
+            self.advance(seq, rows)
+            if not self.day:
+                self.db.execute('DELETE FROM daily_cursor WHERE seq<=?', (seq,))
+        return seq, rows
 
     def recover(self):
         # 回滾的是壓縮檔實際位元組偏移，只刪除本次意圖登記的新檔案。
@@ -176,6 +142,7 @@ class Exporter:
                     os.fsync(handle.fileno())
         with self.db:
             self.db.execute('DELETE FROM pending')
+            self.db.execute('DELETE FROM recent')
 
     def arrange(self, batch, days):
         # 分批解析一次；只為首次見到的日期列舉所有來源，保留靜默來源表頭。
@@ -239,7 +206,6 @@ class Exporter:
         with self.db:
             self.db.executemany('INSERT OR REPLACE INTO files VALUES(?,?)', written)
             self.db.executemany('INSERT INTO days VALUES(?)', [(day,) for day in days])
-            self.db.execute('DELETE FROM recent')
-            self.db.executemany('INSERT INTO recent VALUES(?)', [(name,) for name, _ in written])
-            self.db.execute('UPDATE cursor SET seq=?,rows=?', (seq, rows))
+            self.db.executemany('INSERT OR IGNORE INTO recent VALUES(?)', [(name,) for name, _ in written])
+            self.advance(seq, rows)
             self.db.execute('DELETE FROM pending')

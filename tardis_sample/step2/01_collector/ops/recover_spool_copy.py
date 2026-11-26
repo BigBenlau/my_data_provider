@@ -41,7 +41,7 @@ def replay_worker(store, path):
 
 def snapshot_stamp(snapshot):
     # 主檔、WAL、未封段 JSONL 與目錄時間用於識別凍結快照，共享記憶體檔可重建。
-    files = [snapshot / 'manifest.json', snapshot / 'raw', *(snapshot / 'raw').glob('*.part'),
+    files = [snapshot / 'manifest.json', snapshot / 'raw', *(snapshot / 'raw').rglob('*.part'),
              *(snapshot / '_state').glob('*.sqlite*'), *snapshot.glob('_spool/*/spool.sqlite*')]
     stamp = {}
     for path in files:

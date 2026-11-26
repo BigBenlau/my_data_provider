@@ -1,5 +1,31 @@
 # Tardis 原碼核對紀錄
 
+## 2026-11-26 副本去重與跨盤重播
+
+此次重新解析 master 為 `b75d1c5788c1724dbc6b73be0e1db2a158f93f57`，逐檔核對以下原始碼。01 的副本去重 v2 比較原生事件連同發布封裝，02 的本地 mapper 繼續依原有欄位、空值、時間單位、輸出觸發與快照重置規則重播。Bybit `publicTrade` 取成員 `T` 作成交時間。不同外層 `ts` 在 01 均保留，02 對正規化成交欄位完全相同的副本只輸出首筆，接收時間沿用該筆本機時間。跨盤讀取由 `../../common/segments.py`、`../../common/raw_reader.py` 提供，版本及本地 SHA-256 在正規化報告中保存。
+
+| 上游原始檔 | SHA-256 |
+|---|---|
+| [binance.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/mappers/binance.ts) | `819260e0bee154a61b8dcbfb448bfa65276c14db4b57999d69528ba7daa6bf9e` |
+| [bybit.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/mappers/bybit.ts) | `1c2f4d1aace0bc22b4d5203031eb59c1d159596b269bbcf3eedc87ca0fa7617f` |
+| [okex.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/mappers/okex.ts) | `89cca5ab9fb87fed5238a83fe0f7777678c26e424969813a6204a1ffbc6432d0` |
+| [coinbase.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/mappers/coinbase.ts) | `a1ca942e3e1a50279f11221d931e14d412c234e3fc5c5b45d61698b790142edf` |
+| [upbit.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/mappers/upbit.ts) | `42e41efa1a6a426d0974c5205d669d1b6a3f52f0f693e9bc89dc62424c2212ac` |
+| [mapper.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/mappers/mapper.ts) | `15221302ca9a469b2c6aa8c3d51662dafb44c7644f452da340046eefb0559f62` |
+| [booksnapshot.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/computable/booksnapshot.ts) | `ff176e69039a3c9d85de13973013a677e8e189fe892d4a07df341ed9d07770a1` |
+| [orderbook.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/orderbook.ts) | `960febd312668d6a43ec38d95d2c15abb9bd374338dadf8dbaae8701bd29b576` |
+| [handy.ts](https://github.com/tardis-dev/tardis-node/blob/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src/handy.ts) | `17c69e74ccdd15dc95495cab0c3dc50fa74b80c51837d84ada2017aadf855d4a` |
+
+## 2026-11-26 並行重播、缺失與有界記憶體
+
+本次重新解析 GitHub master 至 `b75d1c5788c1724dbc6b73be0e1db2a158f93f57`，下載五家 mapper、ticker helper、BookSnapshot、OrderBook 與 handy 共九檔，內容與上表永久連結及 SHA-256 逐檔相同。[固定原碼](https://github.com/tardis-dev/tardis-node/tree/b75d1c5788c1724dbc6b73be0e1db2a158f93f57/src)
+
+本地 `replay_cli.py` 以交易所為程序邊界，`replay_input.py` 依提交序讀取封段並定位缺失，`normalization.py` 與 `replay_report.py` 分批提交索引及串流報告。完整輸入的價格、數量、事件與接收時間、空值、成交去重與報價變更觸發沿用各家 mapper。合併深度的 Binance 候選仍取請求開始時間以後的歷史，按原生 u 排序，同 u 沿用提交順序。環形磁碟索引保留同樣的 20,000 筆歷史與超限判定。缺少已提交原文時，本地另行記錄可定位的缺口並重新暖機簿與 ticker，保留跨缺口的成交索引。完整日、單邊窗、跨批次、缺失後恢復與並行輸出的固定案例在 `../tests/test_replay_options.py`。
+
+## 2026-11-26 每日分檔與採集中重播
+
+本次從 GitHub 重新解析 master 並下載 `b75d1c5788c1724dbc6b73be0e1db2a158f93f57` 的五個 mapper、狀態 helper、訂單簿、快照與時間 helper。九檔 SHA-256 均符合上表的永久連結及雜湊。`common/segments.py` 和 `common/raw_reader.py` 依原始提交序讀取已封段範圍。`normalization.py` 的 `--date` 使用 UTC 事件時間窗，從批次起點預熱。價格、數量、接收與事件時間、空值及輸出觸發沿用各交易所 mapper；跨日保留訂單簿、ticker 與去重狀態。固定資料驗證跨午夜 ticker 預熱、隔日接收的成交，以及與整批時間窗重播的 CSV 位元組一致性。採集中產物僅涵蓋報告所記錄的封段末序號。
+
 ## 2026-11-26 目錄重排核對
 
 重新從 GitHub 讀取 master 的 commit `a6b0cfa0848fa2a8b0b46a10b25a1427ce944c73`。下列所有檔案與搬移前的工作區版本逐位元組相同。

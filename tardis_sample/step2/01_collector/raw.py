@@ -13,6 +13,7 @@ from .transport import adapter, decode_frame
 import gzip
 import queue
 import shutil
+import tempfile
 import threading
 import time
 import fcntl
@@ -268,7 +269,8 @@ class Writer:
         if not self.compressed:
             self.day, self.opened = day, now
             name = f'{record["seq"]:012d}_{utc(record["local_timestamp"], "%Y-%m-%dT%H%M%S")}.jsonl.gz.part'
-            self.path = self.root / 'raw' / name
+            self.path = self.root / 'raw' / day / name
+            self.path.parent.mkdir(exist_ok=True)
             self.handle = self.path.open('xb')
             self.compressed = gzip.GzipFile(filename='', mode='wb', fileobj=self.handle, compresslevel=1, mtime=0)
             LOG.info('event=raw_segment_opened path=%s first_seq=%s', self.path, record['seq'])
@@ -369,3 +371,43 @@ def export_channels(source, output, recover=False):
         atomic_json(output / 'channel_export_report.json', report)
     return report
 
+
+def export_day_jsonl(source, output, day):
+    # 將單一主管批次的指定接收日匯成一個可攜檔，保留每行原始位元組與全域序號。
+    from common.segments import catalog_entries, sealed_snapshot, segment_lines, utc_day
+    from .retention import sync_directory
+    root = Path(source).resolve()
+    directory = Path(output).resolve()
+    target = directory / (utc_day(day) + '.jsonl.gz')
+    if directory == root or any(directory.is_relative_to(root/d) for d in ('raw', '_state', '_spool')):
+        raise ValueError('choose an export directory outside collector storage')
+    manifest = json.loads((root/'manifest.json').read_text())
+    if manifest.get('schema_version') != 3 or manifest['status'] not in ('running', 'stopped'):
+        raise ValueError('export-jsonl requires a running or stopped supervisor run')
+    last = manifest['raw_records'] if manifest['status'] == 'stopped' else None
+    limit = sealed_snapshot(root, day) if last is None else last
+    directory.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise FileExistsError(target)
+    count = 0
+    with tempfile.NamedTemporaryFile(dir=directory, suffix='.part', delete=False) as tmp:
+        temporary = Path(tmp.name)
+    try:
+        with temporary.open('wb') as handle:
+            with gzip.GzipFile(filename='', mode='wb', fileobj=handle, compresslevel=1, mtime=0) as stream:
+                for name, first, end in catalog_entries(root, 0, last, limit=limit, day=day):
+                    part_day = Path(name).parent.as_posix()
+                    if part_day not in ('.', day):
+                        continue
+                    for record, line in segment_lines(root, name, first, end):
+                        if part_day == day or utc(record['local_timestamp']) == day:
+                            stream.write(line)
+                            count += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+        # 同一磁碟原子發布；其他程序已建立目的檔時保留其版本。
+        os.link(temporary, target)
+        sync_directory(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return dict(path=str(target), utc_receive_date=day, rows=count, sealed_through_seq=limit)

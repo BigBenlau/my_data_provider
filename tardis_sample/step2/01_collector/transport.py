@@ -137,11 +137,14 @@ class BaseCollector:
     replica_group_limit = 100
     continuity_channels = {}
     replica_silence_seconds = {}
+    connection_spacing = 0
     connection_limits = ((300, 150),)
     legacy_multi_market = False
     optional_channels = ()
     probe_channels = ()
     native_fields = {}
+    publication_fields = frozenset()
+    publication_object = None
     variant_fields = {}
     rest_policy = None
     time_unit = 'ms'

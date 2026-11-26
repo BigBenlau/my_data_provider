@@ -93,13 +93,30 @@ class Schedule:
         self.db.execute('INSERT INTO usage VALUES(?,?,?,?)', (scope, now, weight, int(regular)))
         return True
 
+    def pause_ws(self,seconds):
+        # 429 與主動錯峰共用同一出口閘門，較晚的冷卻期限優先。
+        with self.db:
+            self.ws_gate(self.now()+seconds)
+
+    def ws_gate(self,until):
+        # 呼叫端控制交易，讓取得握手名額與下一次允許時間一起提交。
+        self.db.execute('INSERT INTO cooldown(scope,until) VALUES(?,?) ON CONFLICT(scope) '
+                        'DO UPDATE SET until=max(until,excluded.until)',('ws-handshake',until))
+
     def connection(self, market):
         # 連線嘗試預算跨 A/B/C 共用，避免同時重連突破 IP 配額。
         self.db.execute('BEGIN IMMEDIATE')
         try:
+            gate = self.db.execute("SELECT until FROM cooldown WHERE scope='ws-handshake'").fetchone()
+            if gate and gate[0] > self.now():
+                self.db.rollback()
+                return False
             limits = [(300, self.config['redundancy']['ws_attempts_per_5min']), *adapter(market).connection_limits]
             result = all(self.available(f'ws:{self.config["family"]}:{period}:{cap}', 1, cap, period) for period, cap in limits)
-            if result: self.db.commit()
+            if result:
+                if adapter(market).connection_spacing:
+                    self.ws_gate(self.now()+adapter(market).connection_spacing)
+                self.db.commit()
             else: self.db.rollback()
             return result
         except BaseException:

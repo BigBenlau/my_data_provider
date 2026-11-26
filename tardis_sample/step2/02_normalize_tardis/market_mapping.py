@@ -2,7 +2,7 @@
 from collections import Counter
 from common import BBO, dec, encode
 from common.protocol import classify, decode
-from .normalization import Side
+from .normalization import Side, invalid_payload
 
 SPOT = ('trades', 'quotes', 'book_ticker')
 RESET = ('disconnected', 'session_end', 'book_gap')
@@ -97,9 +97,9 @@ class NativeMapper:
             kind, _ = classify(record, obj)
             if kind != 'data':
                 return []
-        except (ValueError, TypeError, KeyError, AttributeError):
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
             self.invalidate(key)
-            self.issues['invalid_payload'] += 1
+            invalid_payload(self, record, exc)
             return []
         return self.map_items(key, record, obj)
 
@@ -108,15 +108,15 @@ class NativeMapper:
         items = obj.get('data')
         messages = (dict(obj, data=[item]) for item in items) if isinstance(items, list) else (obj,)
         rows = []
-        for message in messages:
+        for index, message in enumerate(messages):
             try:
                 for target, row in self.map_message(key, record, message):
                     if row is not None:
                         rows.append((target, dict(row, exchange=key[0], symbol=key[1],
                                                   local_timestamp=record['local_timestamp'])))
-            except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
                 self.invalidate(key)
-                self.issues['invalid_payload'] += 1
+                invalid_payload(self, record, exc, index)
         return rows
 
     def trade(self, key, tid, price, amount, side, timestamp):

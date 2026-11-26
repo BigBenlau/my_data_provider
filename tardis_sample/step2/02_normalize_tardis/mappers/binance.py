@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """第 02 階段，重播 Binance 現貨及 USD-M 期貨並輸出 Tardis CSV。"""
 import base64
-from collections import Counter, deque
+from collections import Counter
 from decimal import Decimal
 import json
 from common import BBO, TYPES, dec, micros
 from common.protocol import validate
-from ..normalization import BookError, Side
+from ..normalization import BookError, Side, invalid_payload
 
 class Book:
     """單一 snapshot 世代的 Binance L2 狀態，包含快照前增量緩存及序號接合。"""
@@ -90,10 +90,16 @@ class Mapper:
         self.db=db;db.execute('CREATE TABLE IF NOT EXISTS seen (exchange TEXT,symbol TEXT,id TEXT,PRIMARY KEY(exchange,symbol,id)) WITHOUT ROWID')
         self.books={};self.tickers={};self.sessions={};self.previous_bbo={};self.issues=Counter()
         self.depth_history={}
+        db.execute('''CREATE TABLE IF NOT EXISTS depth_history (market, symbol, slot INTEGER, serial INTEGER, received INTEGER,
+                   unit TEXT, update_id TEXT, raw, encoded INTEGER, wrapped INTEGER,
+                   PRIMARY KEY(market,symbol,slot)) WITHOUT ROWID''')
+        db.execute('DELETE FROM depth_history')
     def reset(self):
         # 跨 run 重置 book／ticker/session，但保留跨 run 的交易 ID 去重索引。
         self.books.clear();self.tickers.clear();self.sessions.clear();self.previous_bbo.clear()
-        self.depth_history.clear()
+        if self.depth_history:
+            self.db.execute('DELETE FROM depth_history')
+            self.depth_history.clear()
     def depth_engine(self, record):
         # 每次 session 變更都捨棄舊訂單簿；記憶體只保留每個商品的目前狀態。
         if not record['channel'].startswith('depth'):
@@ -103,7 +109,8 @@ class Mapper:
             self.books[pair] = BookEngine(pair[0])
             self.sessions[pair] = record['session']
             self.previous_bbo.pop(pair, None)
-            self.depth_history.pop(pair, None)
+            if self.depth_history.pop(pair, None) is not None:
+                self.db.execute('DELETE FROM depth_history WHERE market=? AND symbol=?', pair)
             if record.get('legacy_schema'):
                 self.books[pair].begin(-1)
         return self.books[pair]
@@ -159,20 +166,37 @@ class Mapper:
         return row
 
     def merged_depth(self, record, data, engine):
-        # 合併封裝沒有副本生命週期事件；依 REST 請求開始時間重建候選快照緩存。
+        # 以磁碟環形索引保留原文，避免每商品在記憶體常駐兩萬份已解碼深度。
         pair = record['exchange'], record['symbol']
-        history = self.depth_history.setdefault(pair, deque(maxlen=engine.limit))
+        serial = self.depth_history.get(pair, 0)
         if record['channel'] != 'depthSnapshot':
-            history.append((data, record['local_timestamp'], record.get('time_unit', 'ms')))
+            self.db.execute('INSERT OR REPLACE INTO depth_history VALUES (?,?,?,?,?,?,?,?,?,?)',
+                            (*pair, serial % engine.limit, serial, record['local_timestamp'], record.get('time_unit', 'ms'),
+                             str(data['u']), record['raw'], record.get('encoding') == 'base64', record['kind'] == 'ws'))
+            self.depth_history[pair] = serial + 1
             return
         started = record['request_started_us']
         engine.begin(record['generation'])
-        if len(history) == engine.limit and history[0][1] > started:
-            engine.pending = None; self.issues['merged_snapshot_history_overflow'] += 1
-            return
-        # 只在離線階段整理同一快照候選的原生更新序號；不改寫 JSONL 提交順序。
-        pending = [item for item in history if item[1] >= started]
-        engine.pending.buffer.extend(sorted(pending, key=lambda item: int(item[0]['u'])))
+        if serial >= engine.limit:
+            oldest = self.db.execute('SELECT received FROM depth_history WHERE market=? AND symbol=? AND slot=?',
+                                     (*pair, serial % engine.limit)).fetchone()[0]
+            if oldest > started:
+                engine.pending = None
+                self.issues['merged_snapshot_history_overflow'] += 1
+                return
+        engine.pending.buffer = self.snapshot_updates(pair, started)
+
+    def snapshot_updates(self, pair, started):
+        # 只排序符合請求時間的輕量序號；同 u 沿用提交順序，一次還原一筆原文。
+        entries = self.db.execute('SELECT update_id,serial,slot FROM depth_history '
+                                  'WHERE market=? AND symbol=? AND received>=?', (*pair, started))
+        order = sorted((int(update), serial, slot) for update, serial, slot in entries)
+        for _, _, slot in order:
+            raw, encoded, wrapped, local, unit = self.db.execute(
+                'SELECT raw,encoded,wrapped,received,unit FROM depth_history WHERE market=? AND symbol=? AND slot=?',
+                (*pair, slot)).fetchone()
+            payload = json.loads(base64.b64decode(raw) if encoded else raw, parse_float=Decimal)
+            yield payload['data'] if wrapped else payload, local, unit
 
     def ticker(self, record, data):
         # 合併衍生品欄位，未知值保持空白；OI 不可直接替換行情事件時間。
@@ -247,6 +271,6 @@ class Mapper:
                                       local_timestamp=row.get('local_timestamp', record['local_timestamp'])))]
         except BookError as exc:
             self.issues[str(exc)] += 1
-        except (ValueError, TypeError, KeyError):
-            self.issues['invalid_payload'] += 1
+        except (ValueError, TypeError, KeyError) as exc:
+            invalid_payload(self, record, exc)
         return []

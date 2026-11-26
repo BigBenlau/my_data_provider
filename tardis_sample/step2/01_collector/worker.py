@@ -16,6 +16,7 @@ from .delivery import Spool, read_packet, write_packet
 from .redundancy import feed_groups, identity, local_paths, source_inventory
 from .replica_protocol import subscription, classify_group, atoms
 from .rest_schedule import Schedule
+from .ws_rotation import GroupLines
 
 
 class Worker:
@@ -29,6 +30,7 @@ class Worker:
         self.schedule = Schedule(self.paths['control'] / 'schedule.sqlite', config)
         self.groups = feed_groups(config); self.repair = {}; self.draining = False; self.ack_ms = 0
         self.route_cooldowns = {}
+        self.lines = {g['id']: GroupLines(self,g) for g in self.groups}
         self.stats = {name: dict(connected=False, subscribed=False, received=0, session='', last_data_us=None)
                       for name in source_inventory(config)}
         self.proxy = proxy_url(config.get('proxy')); self.started = time.time()
@@ -46,11 +48,13 @@ class Worker:
             excluded = [url for (name,url),until in self.route_cooldowns.items() if name == group['id'] and until > time.monotonic()]
             endpoint = await self.schedule.call('endpoint', group, excluded)
             if not endpoint or not await self.schedule.call('connection', group['feeds'][0]['exchange']):
-                await asyncio.sleep(1); continue
+                spacing = adapter(group['feeds'][0]['exchange']).connection_spacing
+                await asyncio.sleep(spacing*random.uniform(.8,1.5) if spacing else 1)
+                continue
             session = uuid.uuid4().hex; received = 0
             self.event(group['feeds'][0], 'connect_attempt', endpoint=endpoint, group=group['id'], session=session)
             for feed in group['feeds']:
-                self.stats[key(feed)].update(connected=False, subscribed=False, session=session, last_data_us=None, first_data_us=None,
+                group.get('stats', self.stats)[key(feed)].update(connected=False, subscribed=False, session=session, last_data_us=None, first_data_us=None,
                                              session_started_us=time.time_ns() // 1000, received=0)
             repaired = False; error = None
             try:
@@ -60,16 +64,20 @@ class Worker:
             except (aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
                 repaired = str(exc) == 'peer_ahead_repair'
                 error = exc
-                self.event(group['feeds'][0], 'disconnected', group=group['id'], reason=reason(exc))
+                self.event(group['feeds'][0], 'disconnected', group=group['id'], session=session, endpoint=endpoint, reason=reason(exc))
             finally:
-                for feed in group['feeds']: self.stats[key(feed)]['connected'] = False
-            valid = any(self.stats[key(f)]['last_data_us'] for f in group['feeds'])
+                for feed in group['feeds']: group.get('stats', self.stats)[key(feed)]['connected'] = False
+            valid = any(group.get('stats', self.stats)[key(f)]['last_data_us'] for f in group['feeds'])
             if not valid and not repaired: await self.route_failed(group, endpoint, error, failures)
             failures = 0 if valid else failures + 1
             await asyncio.sleep(random.uniform(.5, min(30, 2 ** min(failures + 1, 5))))
 
     async def route_failed(self, group, endpoint, error, failures):
         # 網路暫時失敗只冷卻本 worker，不能讓另一條健康連線的路由被全域封鎖。
+        if isinstance(error,aiohttp.WSServerHandshakeError) and error.status==429:
+            delay = retry_after((error.headers or {}).get('Retry-After'),min(60,2**min(failures+1,6)))
+            await self.schedule.call('pause_ws',max(1,delay))
+            self.event(group['feeds'][0],'ws_rate_limited',endpoint=endpoint,group=group['id'],cooldown=delay)
         protocol = isinstance(error, aiohttp.WSServerHandshakeError) and error.status in (400,404,410,426)
         if str(error) == 'route_probe_no_matching_data' or protocol:
             await self.schedule.call('route_result', group, endpoint, False)
@@ -77,7 +85,7 @@ class Worker:
 
     async def receive(self, ws, group, endpoint, session):
         # 主動 ping 不受行情流量影響；資料與雙向連線健康分開判斷。
-        for feed in group['feeds']: self.stats[key(feed)]['connected'] = True
+        for feed in group['feeds']: group.get('stats', self.stats)[key(feed)]['connected'] = True
         await ws.send_json(subscription(group))
         started = last_ping = last_app = time.monotonic(); pong_deadline = None
         feed = group['feeds'][0]
@@ -88,7 +96,6 @@ class Worker:
                 now = time.monotonic()
                 if not count and now - started > 20 and feed['channel'] in cls.probe_channels:
                     raise TimeoutError('route_probe_no_matching_data')
-                if self.repair_due(group, session): raise ValueError('peer_ahead_repair')
                 if pong_deadline and now > pong_deadline: raise TimeoutError('ping_timeout')
                 if now - last_ping >= 20:
                     await ws.ping(); last_ping = now; pong_deadline = now + 10
@@ -114,18 +121,18 @@ class Worker:
         # 指令只適用於觀察時的連線；恢復收訊或過期後不得再中斷新連線。
         command = self.repair.pop(group['id'], None)
         if not command or command['session'] != session or time.time() > command['expires']: return False
-        newest = max(self.stats[key(f)].get('last_data_us') or 0 for f in group['feeds'])
+        newest = max(group.get('stats', self.stats)[key(f)].get('last_data_us') or 0 for f in group['feeds'])
         return newest <= command['last_data_us']
 
     def control(self, group):
         # 控制封包只更新傳輸健康，不增加行情筆數或交接共同事件數。
-        for feed in group['feeds']: self.stats[key(feed)]['last_control_us'] = time.time_ns() // 1000
+        for feed in group['feeds']: group.get('stats', self.stats)[key(feed)]['last_control_us'] = time.time_ns() // 1000
 
     def check_subscription(self, group, started):
         # 訂閱逾時只處理有 ACK 的交易所；不能因冷門商品沒成交就斷線。
         cls = adapter(group['feeds'][0]['exchange'])
         if cls.requires_ack and time.monotonic() - started > 15:
-            if any(not self.stats[key(f)]['subscribed'] for f in group['feeds']):
+            if any(not group.get('stats', self.stats)[key(f)]['subscribed'] for f in group['feeds']):
                 raise TimeoutError('subscription_ack_timeout')
 
     def message(self, msg, group, endpoint, session):
@@ -140,7 +147,7 @@ class Worker:
         if kind == 'error': raise ValueError(str(obj))
         if kind == 'ack':
             self.control(group)
-            for feed in matching: self.stats[key(feed)]['subscribed'] = True
+            for feed in matching: group.get('stats', self.stats)[key(feed)]['subscribed'] = True
             return 0
         if kind != 'data':
             self.application_control(group, obj)
@@ -152,11 +159,11 @@ class Worker:
         record.pop('urls', None)
         # 完整驗證與事件指紋交由 supervisor 一次執行，收訊端完整保留原文。
         self.spool.emit(record)
-        if self.stats[key(feed)]['last_data_us'] is None:
-            self.stats[key(feed)]['first_data_us'] = received
+        if group.get('stats', self.stats)[key(feed)]['last_data_us'] is None:
+            group.get('stats', self.stats)[key(feed)]['first_data_us'] = received
             self.event(feed, 'first_message', session=session, endpoint=endpoint)
-        self.stats[key(feed)].update(subscribed=True, last_data_us=received,
-                                     received=self.stats[key(feed)]['received'] + 1)
+        group.get('stats', self.stats)[key(feed)].update(subscribed=True, last_data_us=received,
+                                     received=group.get('stats', self.stats)[key(feed)]['received'] + 1)
         return 1
 
     def application_control(self, group, obj):
@@ -166,7 +173,7 @@ class Worker:
         for feed in group['feeds']:
             fields = adapter(feed['exchange']).control_fields(feed, obj)
             if fields is not None:
-                self.stats[key(feed)].update(fields, last_control_us=time.time_ns() // 1000)
+                group.get('stats', self.stats)[key(feed)].update(fields, last_control_us=time.time_ns() // 1000)
 
     async def rest_loop(self):
         # 租約與預算跨副本共用；只有本次 claim 的 worker 發送請求。
@@ -225,9 +232,9 @@ class Worker:
         command = self.paths['control'] / (self.worker_id + '.drain')
         if command.exists(): self.stop.set()
         return dict(worker=self.worker_id, pid=os.getpid(), started=self.started, updated=time.time(), identity=self.identity,
-                    draining=self.draining, feeds=self.stats, enqueued=self.spool.seq, written=self.spool.written,
+                    draining=self.draining, feeds=self.stats, lines={g:v.status() for g,v in self.lines.items() if v.token or v.completed}, enqueued=self.spool.seq, written=self.spool.written,
                     ack=self.spool.ack, pending_bytes=self.spool.bytes, memory_bytes=self.spool.queued_bytes,
-                    spool_capacity_waits=self.spool.capacity_waits,
+                    spool_capacity_waits=self.spool.capacity_waits, written_bytes=self.spool.written_bytes, pending_records=self.spool.written-self.spool.ack,
                     oldest_pending_s=max(0, time.time() - self.spool.oldest_us / 1e6) if self.spool.oldest_us else 0,
                     ack_ms=self.ack_ms)
 
@@ -249,7 +256,9 @@ class Worker:
                     while True:
                         await write_packet(writer, dict(type='status', status=self.status()))
                         response = await asyncio.wait_for(read_packet(reader), 10)
-                        self.repair.update({r['group']: r for r in response.get('repair', [])})
+                        order = response.get('rotation', {})
+                        for gid, line in self.lines.items():
+                            line.command(order if gid == order.get('group') else {})
                         await asyncio.sleep(1)
                 finally:
                     writer.close(); await writer.wait_closed()
@@ -273,15 +282,22 @@ class Worker:
 
     async def send_connected(self, reader, writer):
         # 先送狀態再送資料；ACK 只能由正式持久化進度推進。
+        after, retry = self.spool.ack, time.monotonic()
         while True:
-            packet = await asyncio.to_thread(self.spool.pending_packet)
+            cursor = after
+            if time.monotonic() >= retry and after > self.spool.ack:
+                cursor = self.spool.ack
+                retry = time.monotonic()+5
+            packet = await asyncio.to_thread(self.spool.pending_packet, max(cursor,self.spool.ack))
             if not packet:
                 await asyncio.sleep(.1); continue
             await write_packet(writer, packet)
             started = time.monotonic()
             response = await asyncio.wait_for(read_packet(reader), 60)
             if response.get('error'): raise ValueError(response['error'])
-            await asyncio.to_thread(self.spool.acknowledge, response['ack'])
+            after = max(after,response.get('scanned', response['ack']))
+            if response['ack'] > self.spool.ack:
+                await asyncio.to_thread(self.spool.acknowledge, response['ack'])
             self.ack_ms = round((time.monotonic() - started) * 1000, 3)
 
     async def watchdog(self):
@@ -304,7 +320,7 @@ class Worker:
         # 正常 drain 先停止收訊，再排空 spool；逾時仍保留磁碟待交付資料。
         sender = asyncio.create_task(self.sender()); watcher = asyncio.create_task(self.watchdog())
         control = asyncio.create_task(self.control_sender())
-        captures = [asyncio.create_task(self.stream(group)) for group in self.groups]
+        captures = [asyncio.create_task(line.run()) for line in self.lines.values()]
         if self.rest_http is not None:
             captures.extend(asyncio.create_task(self.rest_loop()) for _ in range(2))
         stop = asyncio.create_task(self.stop.wait())
@@ -335,7 +351,18 @@ class Worker:
 async def run_worker(root, worker_id, image):
     # 所有 worker 使用同一入口；身分及路徑由 supervisor 指派。
     config = json.loads((Path(root) / '_state' / 'config.json').read_text())
-    worker = Worker(root, config, worker_id, image)
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT): loop.add_signal_handler(sig, worker.stop.set)
-    await worker.execute()
+    try:
+        worker = Worker(root, config, worker_id, image)
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT): loop.add_signal_handler(sig, worker.stop.set)
+        await worker.execute()
+    except Exception as exc:
+        # 新舊主管都能找到該程序的根因；磁碟無法寫入時仍從容器標準錯誤輸出。
+        from common import atomic_json
+        LOG.exception('event=worker_failed worker=%s', worker_id)
+        try:
+            atomic_json(Path(root) / '_state' / (worker_id + '.failure.json'),
+                        dict(type=type(exc).__name__, reason=str(exc)[:2048], time_us=time.time_ns() // 1000))
+        except OSError:
+            LOG.exception('event=worker_failure_report_unwritable worker=%s', worker_id)
+        raise

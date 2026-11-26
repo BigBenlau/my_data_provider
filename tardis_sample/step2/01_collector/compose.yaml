@@ -11,6 +11,7 @@ x-supervisor: &supervisor
   stop_grace_period: 90s
   environment:
     TZ: Asia/Shanghai
+    SUPERVISOR_LOCK_ROOT: /var/lib/collector-locks
   logging:
     driver: json-file
     options:
@@ -28,27 +29,36 @@ services:
     volumes:
       - '${DATA_ROOT:?set absolute DATA_ROOT}/binance:/data'
       - /var/run/docker.sock:/var/run/docker.sock
+      - supervisor_locks:/var/lib/collector-locks
   bybit:
     <<: *supervisor
     command: [python, /app/step2/01_collector/01_collect.py, cluster, --exchange, bybit, --output, /data, --host-output, '${DATA_ROOT:?set absolute DATA_ROOT}/bybit']
     volumes:
       - '${DATA_ROOT:?set absolute DATA_ROOT}/bybit:/data'
       - /var/run/docker.sock:/var/run/docker.sock
+      - supervisor_locks:/var/lib/collector-locks
   okx:
     <<: *supervisor
     command: [python, /app/step2/01_collector/01_collect.py, cluster, --exchange, okx, --output, /data, --host-output, '${DATA_ROOT:?set absolute DATA_ROOT}/okx']
     volumes:
       - '${DATA_ROOT:?set absolute DATA_ROOT}/okx:/data'
       - /var/run/docker.sock:/var/run/docker.sock
+      - supervisor_locks:/var/lib/collector-locks
   coinbase:
     <<: *supervisor
     command: [python, /app/step2/01_collector/01_collect.py, cluster, --exchange, coinbase, --output, /data, --host-output, '${DATA_ROOT:?set absolute DATA_ROOT}/coinbase']
     volumes:
       - '${DATA_ROOT:?set absolute DATA_ROOT}/coinbase:/data'
       - /var/run/docker.sock:/var/run/docker.sock
+      - supervisor_locks:/var/lib/collector-locks
   upbit:
     <<: *supervisor
     command: [python, /app/step2/01_collector/01_collect.py, cluster, --exchange, upbit, --output, /data, --host-output, '${DATA_ROOT:?set absolute DATA_ROOT}/upbit']
     volumes:
       - '${DATA_ROOT:?set absolute DATA_ROOT}/upbit:/data'
       - /var/run/docker.sock:/var/run/docker.sock
+      - supervisor_locks:/var/lib/collector-locks
+
+# 舊主管與候選共用核心檔鎖；行情仍保存於各自的資料掛載。
+volumes:
+  supervisor_locks:

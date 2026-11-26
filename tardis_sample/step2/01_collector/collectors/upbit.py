@@ -5,6 +5,7 @@ from ..transport import BaseCollector
 
 class Collector(BaseCollector):
     """交易所專屬的來源與協議實作；傳輸、落盤與日誌沿用 BaseCollector。"""
+    publication_fields = {'timestamp'}
     probe_channels = ('trade',)
 
     requires_ack = False
@@ -12,6 +13,8 @@ class Collector(BaseCollector):
     replica_strong_channels = ('trade',)
     continuity_channels = {}
     replica_silence_seconds = {}
+    # 平攤同一出口的握手，避免同時建立多條新線。
+    connection_spacing = .35
     connection_limits = ((1, 4),)
     @staticmethod
     def ws_asset(symbol):

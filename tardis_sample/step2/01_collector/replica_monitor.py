@@ -13,9 +13,11 @@ class Monitor:
         self.store = store; self.db = store.db; self.config = config
         self.options = config['redundancy']; self.feeds = configured_feeds(config)
         self.groups = {g['id']: g for g in feed_groups(config)}
+        self.feed_groups = {key(f):gid for gid,g in self.groups.items() for f in g['feeds']}
         self.reported = {}; self.latest = {}; self.cooldowns = {}
         self.coverage = {}; self.proofs = {}
         self.delivery_samples = {}
+        self.backlogged = False; self.clear_samples = 0; self.peaks = {}; self.clear_reports = {}
         self.current = {w: json.loads(s) for w, s in self.db.execute('SELECT worker,status FROM worker_state')}
         self.blockers = {key(f): 'no_reliable_native_identity' for f in self.feeds
                          if f['channel'] not in adapter(f['exchange']).replica_strong_channels}
@@ -44,10 +46,12 @@ class Monitor:
         a = states.get(left, {}).get('feeds', {}).get(feed, {})
         b = states.get(right, {}).get('feeds', {}).get(feed, {})
         if not all(s.get('connected') and s.get('subscribed') for s in (a, b)): return 0
-        query = '''SELECT a.seq FROM observations a JOIN observations b ON a.seq=b.seq
-            JOIN seen s ON s.seq=a.seq WHERE a.worker=? AND b.worker=? AND s.feed=? AND s.strong=1
-            AND a.session=? AND b.session=? AND a.observed>=? AND b.observed>=? LIMIT ?'''
-        return len(self.db.execute(query, (left, right, self.store.feed_key(feed), a['session'], b['session'], since, since, self.options['match_events'])).fetchall())
+        needed = self.options['match_events']
+        paths = [(left, a['session']), (right, b['session'])]
+        for n in range(needed, 0, -1):
+            if self.store.evidence.common(self.store.feed_key(feed), paths, since, n):
+                return n
+        return 0
 
     def verify(self, candidate, peers, since):
         # 每個來源都必須通過；清算靜默及無可靠身分的來源不能被其他 channel 掩蓋。
@@ -66,17 +70,34 @@ class Monitor:
                 reasons[name] = 'unresolved_gap'
         return not reasons, reasons
 
+    def chain(self,feed,start,end):
+        # 只查與缺口相交的序號邊，冷盤不可用時於恢復後再次排入。
+        import heapq
+        import sqlite3
+        sql = 'SELECT u,previous,first,reset FROM {} WHERE feed=? AND u>? AND u<=? ORDER BY u'
+        args = (feed,start,end)
+        hot = self.db.execute(sql.format('all_edges'),args)
+        edges = hot
+        if self.store.cold.populated:
+            try:
+                old = self.store.cold.connect().execute(sql.format('edges'),args).fetchall()
+                edges = heapq.merge(hot,old,key=lambda row:row[0])
+            except (OSError,sqlite3.Error):
+                self.db.execute('INSERT OR IGNORE INTO cold_gap_retry SELECT rowid FROM gaps WHERE feed=? AND start_u=? AND end_u=?',args)
+        cursor = start
+        for u,prev,first,reset in edges:
+            if not reset and (prev==cursor or (prev is None and first is not None and first<=cursor+1)):
+                cursor=max(cursor,u)
+        return cursor
+
     def resolve_gaps(self):
         # 用跨路序號邊串接缺口；無法串接只回報未覆蓋，不憑較大 u 宣稱已補齊。
         now = time.time(); unresolved = []
-        rows = self.db.execute('SELECT rowid,worker,feed,start_u,end_u,created,resolved FROM gaps WHERE resolved<>1').fetchall()
+        rows = self.db.execute('SELECT rowid,worker,feed,start_u,end_u,created,resolved FROM gaps WHERE rowid IN (SELECT gap FROM dirty_gaps)').fetchall()
         with self.db:
             for ident, worker, feed, start, end, created, resolved in rows:
-                cursor = start
-                edges = self.db.execute('SELECT u,previous,first,reset FROM all_edges WHERE feed=? AND u>? AND u<=? ORDER BY u', (feed, start, end))
-                for u, previous, first, reset in edges:
-                    if reset: continue
-                    if previous == cursor or (previous is None and first is not None and first <= cursor + 1): cursor = max(cursor, u)
+                self.db.execute('DELETE FROM dirty_gaps WHERE gap=?', (ident,))
+                cursor = self.chain(feed,start,end)
                 if cursor >= end:
                     self.db.execute('UPDATE gaps SET resolved=1 WHERE rowid=?', (ident,))
                     LOG.warning('event=single_path_gap_covered worker=%s feed=%s from=%s to=%s', worker, feed, start, end)
@@ -85,7 +106,11 @@ class Monitor:
                     if resolved == 0:
                         LOG.error('event=uncovered_sequence_gap worker=%s feed=%s from=%s to=%s', worker, feed, start, end)
                         self.db.execute('UPDATE gaps SET resolved=2 WHERE rowid=?', (ident,))
-        return sorted(set(unresolved))
+            due = now - self.options['match_wait_seconds']
+            for worker, feed, start, end in self.db.execute('SELECT worker,feed,start_u,end_u FROM gaps WHERE resolved=0 AND created<=?', (due,)):
+                LOG.error('event=uncovered_sequence_gap worker=%s feed=%s from=%s to=%s', worker, feed, start, end)
+            self.db.execute('UPDATE gaps SET resolved=2 WHERE resolved=0 AND created<=?', (due,))
+        return [r[0] for r in self.db.execute('SELECT DISTINCT feed FROM gaps WHERE resolved=2 ORDER BY feed')]
 
     def repairs(self, workers, states):
         # 來源靜默只回報；重連必須有整組停止收訊與持續跨路進度兩項證據。
@@ -104,6 +129,10 @@ class Monitor:
                 if not value or not peers: continue
                 command = self.repair_command(worker, name, value, max(peers, key=lambda v: v['last']), now)
                 if command: commands[worker].append(command)
+        for worker,feed,session,reason,created in self.db.execute('SELECT * FROM session_faults WHERE created>=?',(now-60,)):
+            state = states.get(worker,{}).get('feeds',{}).get(feed,{})
+            if worker in workers and feed in self.feed_groups and state.get('session')==session:
+                commands[worker].append(dict(group=self.feed_groups[feed],session=session,trigger=reason,created=created,expires=created+60))
         return commands, quiet
 
     def group_state(self, group, state, now):
@@ -128,7 +157,7 @@ class Monitor:
             self.reported[identity] = (now, peer['session'], peer['received']); return None
         if now - observation[0] < self.options['match_wait_seconds'] or peer['received'] - observation[2] < 3: return None
         self.cooldowns[cooldown] = now; self.reported.pop(identity, None)
-        LOG.warning('event=group_receive_stalled worker=%s group=%s session=%s action=reconnect', worker, group, value['session'])
+        LOG.warning('event=group_receive_stalled worker=%s group=%s session=%s action=verify_candidate', worker, group, value['session'])
         return dict(group=group, session=value['session'], last_data_us=value['last'], expires=now + 5)
 
     def coverage_state(self, feed, peers, states, now):
@@ -169,9 +198,8 @@ class Monitor:
         for seq in self.store.samples.get(name, ()):
             if seq in matched:
                 continue
-            rows = self.db.execute('SELECT o.worker,o.session FROM observations o JOIN seen s ON s.seq=o.seq '
-                                   'WHERE o.seq=? AND s.strong=1 AND s.feed=?', (seq, self.store.feed_key(name)))
-            if set(pair).issubset(set(rows)):
+            rows = self.db.execute('SELECT path FROM observations WHERE seq=? AND feed=? AND strong=1', (seq,self.store.feed_key(name)))
+            if {self.store.evidence.path(*p) for p in pair}.issubset({r[0] for r in rows}):
                 matched.add(seq)
                 if len(matched) >= needed:
                     return True
@@ -184,6 +212,7 @@ class Monitor:
             return {}
         previous = self.delivery_samples.get(worker)
         sample = {field: state[field] for field in fields}
+        sample['written_bytes'] = state.get('written_bytes',0)
         self.delivery_samples[worker] = sample
         if not previous or sample['started'] != previous['started']:
             return {}
@@ -197,12 +226,36 @@ class Monitor:
             return {}
         growth = (sample['pending_bytes'] - previous['pending_bytes']) / elapsed
         remaining = max(0, self.options['spool_max_bytes'] - sample['pending_bytes'])
-        return dict(enqueued_per_s=round(received / elapsed, 1), ack_per_s=round(acked / elapsed, 1),
+        incoming = max(0,(sample['written_bytes']-previous['written_bytes'])/elapsed)
+        self.peaks[worker] = max(incoming,self.peaks.get(worker,0))
+        peak = self.peaks[worker]
+        extra = dict(peak_spool_bytes_per_s=round(peak,1),pause_capacity_seconds=round(remaining/peak,1) if peak else None) if 'written_bytes' in state else {}
+        return dict(**extra,enqueued_per_s=round(received / elapsed, 1), ack_per_s=round(acked / elapsed, 1),
                     pending_bytes_per_s=round(growth, 1), seconds_to_limit=round(remaining / growth, 1) if growth > 0 else None)
+
+    def pressure(self, workers, states):
+        # 高水位立即暫停例行工作，連續三個新鮮的低水位心跳才解除。
+        values = [states.get(w,{}) for w in workers]
+        cap = self.options['spool_max_bytes']
+        if any(v.get('oldest_pending_s',0)>10 or v.get('pending_bytes',0)>=.8*cap for v in values):
+            self.backlogged = True
+            self.clear_samples = 0
+            self.clear_reports = {}
+        elif self.backlogged:
+            clear = values and all(time.time()-v.get('reported_at',0)<=self.options['worker_timeout']
+                                   and v.get('oldest_pending_s',0)<5 and v.get('pending_bytes',0)<.6*cap for v in values)
+            stamps = {w:states.get(w,{}).get('reported_at',0) for w in workers}
+            if clear and any(t<=self.clear_reports.get(w,0) for w,t in stamps.items()):
+                return
+            self.clear_reports = stamps
+            self.clear_samples = self.clear_samples + 1 if clear else 0
+            if self.clear_samples >= 3:
+                self.backlogged = False
 
     def health(self, workers, active=None):
         # 每五秒彙總程序外的傳輸、收訊、交付及落盤狀態，明示不可證明完整。
-        states = self.states(); repairs, quiet = self.repairs(workers, states)
+        states = self.states(); self.pressure(workers, states)
+        repairs, quiet = self.repairs(workers, states)
         if workers:
             peers = workers[:2] if active is None else active
             now = time.time()
@@ -230,7 +283,7 @@ class Monitor:
         self.latest = dict(updated_us=time.time_ns() // 1000, workers=states, raw_records=written,
                            silent_or_unverified=quiet, uncovered_gaps=gaps, identity_unverified_events=uncertain,
                            data_quality='observed_not_proven_complete', rotation_blockers=self.blockers,
-                           batch_metrics=self.store.metrics, ws_coverage=self.coverage, delivery_rates=rates)
+                           delivery_backlog=self.backlogged, batch_metrics=self.store.metrics, ws_coverage=self.coverage, delivery_rates=rates)
         LOG.info('event=commit_health metrics=%s', json.dumps(self.store.metrics))
         LOG.info('event=supervisor_health jsonl_seq=%s silent_sources=%s uncovered_gaps=%s ambiguity_preserved=%s', written, len(quiet), len(gaps), uncertain)
         return repairs, gaps

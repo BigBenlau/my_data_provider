@@ -4,6 +4,7 @@ from ..transport import BaseCollector
 
 class Collector(BaseCollector):
     """交易所專屬的來源與協議實作；傳輸、落盤與日誌沿用 BaseCollector。"""
+    publication_fields = set()
     time_unit = 'iso8601'
     probe_channels = ('ticker',)
     variant_fields = {('coinbase', 'ticker'): ({'volume_24h', 'volume_30d'}, 'rolling_statistics_variant')}

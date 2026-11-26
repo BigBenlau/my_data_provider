@@ -2,6 +2,7 @@
 import importlib
 import asyncio
 import fcntl
+import csv
 import gzip
 import json
 from pathlib import Path
@@ -219,7 +220,7 @@ class PersistenceTests(unittest.TestCase):
         with patch.object(Exporter, 'commit', side_effect=OSError('crash before cursor')):
             with self.assertRaises(OSError): Exporter(self.root, target).run()
         compress_ready(self.root)
-        self.assertFalse(list((self.root/'raw').glob('*.jsonl')))
+        self.assertFalse(list((self.root/'raw').rglob('*.jsonl')))
         self.assertEqual(Exporter(self.root, target).run()['seq'], 3)
         out = self.root/'replay'; export_channels(self.root, out)
         for path in target.rglob('*.csv.gz'):
@@ -251,6 +252,124 @@ class PersistenceTests(unittest.TestCase):
         file = other / 'trade.csv'; file.write_text('existing')
         with self.assertRaises(FileExistsError): Exporter(self.root, other).run()
         self.assertEqual(file.read_text(), 'existing')
+
+    def test_daily_partitions_late_delivery_and_incremental_csv(self):
+        # 將午夜前後與遲交放入同一批，驗證實體分日、全域排序及每日單檔續寫。
+        midnight = 1704067200000000
+        days = ['2023-12-31', '2024-01-01']
+        send(self.store, 'a', [event(number=i, local=t) for i, t in
+                               enumerate((midnight-1, midnight, midnight-2), 1)])
+        self.store.seal()
+        self.manifest(midnight-1)
+        raw = self.root/'raw'
+        groups = {day: sorted(json.loads(p.read_text())['seq'] for p in (raw/day).glob('*.jsonl')) for day in days}
+        self.assertEqual(groups, {days[0]: [1, 3], days[1]: [2]})
+        self.assertEqual([r['seq'] for r in read_records(self.root)], [1, 2, 3])
+        target = self.root/'daily-csv'
+        for day, count in zip(days, (2, 3)):
+            self.assertEqual(Exporter(self.root, target, day).run()['rows'], count)
+        send(self.store, 'a', [event(number=4, local=midnight-3)], 4)
+        self.store.seal()
+        self.manifest(midnight-1)
+        for _ in range(2):
+            self.assertEqual(Exporter(self.root, target, days[0]).run()['rows'], 4)
+        self.assertEqual(Exporter(self.root, target).run()['rows'], 4)
+        self.assertEqual(Exporter(self.root, target, days[1]).run()['rows'], 4)
+        for day, seqs in zip(days, ([1, 3, 4], [2])):
+            csv_path = target/'binance-futures'/'BTCUSDT'/day/'trade.csv.gz'
+            with gzip.open(csv_path, 'rt', newline='') as handle:
+                self.assertEqual([int(row['capture_seq']) for row in csv.DictReader(handle)], seqs)
+        self.assertEqual(len(list((target/'binance-futures').rglob('trade.csv.gz'))), 2)
+
+    def test_portable_daily_jsonl_flat_backup_and_late_records(self):
+        # 舊版平面檔可混合日期，攜帶版輸出逐行保留原文，重跑不覆寫舊成果。
+        export = importlib.import_module('01_collector.raw').export_day_jsonl
+        day = '2023-12-31'
+        midnight = 1704067200000000
+        send(self.store, 'a', [event(number=i, local=t) for i, t in
+                               enumerate((midnight-1, midnight, midnight-2), 1)])
+        self.store.seal()
+        self.manifest(midnight-1)
+        parts = sorted((self.root/'raw').rglob('*.jsonl'), key=lambda path: path.name)
+        lines = [p.read_bytes() for p in parts]
+        backup = self.root/'backup'
+        (backup/'raw').mkdir(parents=True)
+        (backup/'raw'/'000000000001_legacy.jsonl').write_bytes(b''.join(lines))
+        (backup/'manifest.json').write_bytes((self.root/'manifest.json').read_bytes())
+        for i, root in enumerate((self.root, backup)):
+            target = self.root/f'portable-{i}'
+            result = export(root, target, day)
+            self.assertEqual(result['rows'], 2)
+            self.assertEqual(gzip.decompress(Path(result['path']).read_bytes()), lines[0]+lines[2])
+            with self.assertRaises(FileExistsError):
+                export(root, target, day)
+            csv_root = self.root/f'csv-{i}'
+            self.assertEqual(Exporter(root, csv_root, day).run()['rows'], 2)
+            self.assertEqual(Exporter(root, csv_root).run()['rows'], 3)
+        paths = list((self.root/'csv-0').rglob('*.csv.gz'))
+        for path in paths:
+            other = self.root/'csv-1'/path.relative_to(self.root/'csv-0')
+            self.assertEqual(gzip.decompress(path.read_bytes()), gzip.decompress(other.read_bytes()))
+
+    def test_midnight_partial_commit_recovers_remaining_outbox(self):
+        # 首日已持久化後次日寫入失敗，重開主管只補剩餘原文，重送也不重複發布。
+        midnight = 1704067200000000
+        events = [event(number=i, local=t) for i, t in enumerate((midnight-1, midnight), 1)]
+        write = self.store.write_segment
+        def fail_next_day(rows, day, received):
+            # 只在第二天注入磁碟故障，檢查兩次提交之間的恢復點。
+            if day == '2024-01-01':
+                raise OSError('disk full')
+            return write(rows, day, received)
+        with patch.object(self.store, 'write_segment', side_effect=fail_next_day):
+            with self.assertRaises(fixtures.StorageError):
+                send(self.store, 'a', events)
+        self.assertEqual(self.store.db.execute('SELECT seq FROM outbox').fetchall(), [(2,)])
+        self.store.db.close()
+        self.store = fixtures.MergeStore(self.root, self.config)
+        self.assertEqual(send(self.store, 'a', events), 2)
+        self.store.seal()
+        self.manifest(midnight-1)
+        self.assertEqual([r['seq'] for r in read_records(self.root)], [1, 2])
+
+    def test_daily_live_snapshot_and_state_before_midnight(self):
+        # 午夜前的 last_price 須帶入午夜後首筆標記價，收件跨日至隔天的成交仍依交易時間歸檔。
+        norm = importlib.import_module('02_normalize_tardis.normalization')
+        midnight = 1704067200000000
+        day = '2024-01-01'
+        def message(channel, local, **data):
+            # 保留各頻道的原生外殼，讓正式採集和正規化驗證都實際運作。
+            record = event(channel, local=local)
+            native = json.loads(record['raw'])
+            native['data'].update(data)
+            return dict(record, raw=json.dumps(native))
+        prior = message('ticker', midnight-1, E=midnight//1000-1)
+        mark = message('markPrice@1s', midnight, e='markPriceUpdate', E=midnight//1000, p='98', i='99')
+        trade = message('trade', midnight+86400000000, T=midnight//1000+1000)
+        send(self.store, 'a', [prior, mark])
+        self.manifest(midnight-1)
+        path = self.root/'manifest.json'
+        fixtures.atomic_json(path, dict(json.loads(path.read_text()), status='running'))
+        with self.assertRaisesRegex(ValueError, 'open segment'):
+            norm.replay(norm.mapper_for('binance'), self.root, self.root/'premature', day=day)
+        send(self.store, 'a', [trade], 3)
+        self.store.seal()
+        send(self.store, 'a', [event(number=4, local=midnight+86400000001)], 4)
+        output = self.root/'dated'
+        report = norm.replay(norm.mapper_for('binance'), self.root, output, day=day)
+        self.assertEqual(report['inputs'][0]['sealed_through_seq'], 3)
+        self.assertEqual(report['raw_records'], 3)
+        self.assertTrue(all(p.name.startswith(day) for p in output.rglob('*.csv')))
+        with next((output/'binance-futures/derivative_ticker').glob('*.csv')).open() as handle:
+            self.assertEqual([(r['mark_price'], r['last_price']) for r in csv.DictReader(handle)], [('98', '100')])
+        with next((output/'binance-futures/trades').glob('*.csv')).open() as handle:
+            self.assertEqual(len(list(csv.DictReader(handle))), 1)
+        self.store.seal()
+        self.manifest(midnight-1)
+        full = self.root/'stopped'
+        norm.replay(norm.mapper_for('binance'), self.root, full, start=midnight, end=midnight+86400000000)
+        self.assertEqual({p.relative_to(output):p.read_bytes() for p in output.rglob('*.csv')},
+                         {p.relative_to(full):p.read_bytes() for p in full.rglob('*.csv')})
 
     def test_sealed_backup_without_sqlite(self):
         # 唯讀備份僅有 manifest 與 JSONL 也可重建；宣告多一筆須揭露截斷。

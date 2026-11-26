@@ -2,7 +2,7 @@
 
 每家交易所由一個 supervisor 管理兩個 worker。五家服務共用映像 `market-collector:local`，使用 `--exchange` 選取協議。建置入口 `collector` 屬於 `build` profile，日常啟動的服務是五個交易所 supervisor。商品與原生 channel 由 `settings.json` 的 `exchanges.<交易所>.markets` 指定。[採集設定](settings.json) · [Compose 服務](compose.yaml)
 
-五家交易所的服務名稱、市場 ID、批量啟停與各自可用的 CSV 格式見 [五家交易所操作指南](../RUN_01_02.md)。
+五家交易所的服務名稱、市場 ID 和批量啟停指令見 [01 採集指南](README.md)。各市場可產生的 Tardis CSV 類型見 [02 正規化指南](../02_normalize_tardis/README.md#各交易所的輸出)。
 
 ## 從 Git 建置與短測
 
@@ -37,7 +37,7 @@ export DATA_ROOT="$PWD/output/raw/run-001"
 docker compose up -d "$EXCHANGE"
 
 docker compose logs -f "$EXCHANGE"
-# 只列出這家交易所的 worker，包含換代期間的候選者。
+# 只列出這家交易所的 worker，群組換線時容器名稱維持相同。
 docker ps --filter "label=collector.exchange=$EXCHANGE" --format '{{.Names}}'
 # 正常停止會要求 worker 停止收訊、排空交付後移除容器。
 docker compose stop "$EXCHANGE"
@@ -47,11 +47,55 @@ docker compose stop "$EXCHANGE"
 
 新 worker 的 Docker 名稱是 `collector-<交易所>-<批次識別>-<worker ID>`。六碼批次識別來自資料目錄或 volume 名稱，同批次各副本的最後一段不同。主管把實際名稱寫在該批次的 `_state/runtime.json`，重啟可依登記名稱接管。現有容器沿用建立時的名稱與標籤，新版批次建立的 worker 會帶有 `collector.exchange` 標籤。
 
-主管啟動時解析本機映像的 immutable SHA-256 image ID。換代一律使用該 ID，不執行 pull。不符合映像、程式雜湊或採集設定雜湊的 worker 拒絕加入。程式升級與設定變更使用新的輸出 run。不要在已有資料目錄上混用不同版本。
+主管啟動時解析本機映像的 immutable SHA-256 image ID。換代一律使用該 ID，不執行 pull。不符合映像、程式雜湊或採集設定雜湊的 worker 拒絕加入。只更新相容的主管管理程式，可依下節在同一 run 交接。變更 worker、原始資料協議、儲存實作或採集設定時，使用新 run。
 
-主管使用 `unless-stopped`。worker 使用 `on-failure`，正常 drain 不會被 Docker 自動復活。主管接管意外退出的 worker 時沿用原身分與 spool。儲存故障會停止並報錯，應檢查磁碟及保留的 spool，不可為重啟而刪掉未確認資料。
+主管使用 `unless-stopped`。worker 使用 `on-failure`，正常 drain 不會被 Docker 自動復活。主管接管意外退出的 worker 時沿用原身分與 spool。單一副本報錯時，主管記錄根因、隔離故障程序並以新 ID 補位。確認舊程序停止後，主管以小批次自動補交其已落盤資料；損壞的 spool 留存待查。
 
 如需代理，在設定中明確指定容器可達的代理 URL。容器不會自動取得主機終端的代理環境。`localhost` 在容器內指向該容器。
+
+## 讓兩個版本的主管交接
+
+適用於已由支援交接的版本啟動、且已有 `_state/owner.json` 的批次。一個正式寫入鎖保護 JSONL、索引與 REST 排程。候選主管沿用原 A/B 程序、行情連線及固定的 worker 映像。只有主管管理程式及其相容執行環境可以獨立換版。第一次從沒有交接協議的舊映像部署時，請保留舊批次，以維護窗口正常排空並用新 run 啟動基線版本；舊映像收到正常停止訊號會同步排空其 workers。
+
+從本目錄在同一台 Docker 主機執行。下例針對 Binance，其他四家只需換交易所和原主管名稱。沿用原主管的 `DATA_ROOT`、採集設定及資料掛載。若原服務使用自訂 `--config`，候選也傳相同選項及可見檔案。下列範例適用於本專案 Compose 的 bind mount 部署。
+
+```bash
+export EXCHANGE=binance
+export OLD=step2-binance-1
+export RELEASE=r2
+export NEW="supervisor-${EXCHANGE}-${RELEASE}"
+
+# 以獨立標籤建置新版主管，保留原 worker 映像供該批次替補。
+docker build -f ../Dockerfile -t "market-collector:${RELEASE}" ../..
+IMAGE_ID=$(docker image inspect -f '{{.Id}}' "market-collector:${RELEASE}")
+
+# 共用原容器的行情目錄、Docker socket 與主管鎖 volume。
+docker run -d --init --restart unless-stopped --name "$NEW" \
+  --log-opt max-size=10m --log-opt max-file=3 \
+  --volumes-from "$OLD" -e TZ=Asia/Shanghai \
+  -e SUPERVISOR_LOCK_ROOT=/var/lib/collector-locks "$IMAGE_ID" \
+  python /app/step2/01_collector/01_collect.py cluster \
+  --exchange "$EXCHANGE" --output /data --host-output "$DATA_ROOT/$EXCHANGE" \
+  --supervisor-id "$RELEASE" --takeover --upgrade-timeout 120
+
+docker logs -f "$NEW"
+```
+
+候選先唯讀觀察至少 10 秒。兩個 worker 均需持續收訊及確認提交，所有配置的 WS 須在原 session 保持訂閱，且無已知未覆蓋缺口。純 REST 設定則驗證兩個程序持續運行，且共用排程有新回應、ACK 與正式輸出。舊主管讓出寫入鎖後，worker 維持 WS 並把行情暫存於 spool。新版接手後需再次看到正式序號和兩個 worker 的 ACK 前進、各自接回資料與控制連線、原 session 持續，才寫入新所有權並記錄 `event=supervisor_promoted`。舊主管留在待命狀態。驗證逾時或候選崩潰時，只要舊主管仍在運行，就會接回寫入鎖和待交付資料。
+
+核對成功後可停止待命容器。以後查看日誌、停止或重新啟動該交易所時，操作目前的主管容器；下一次交接以它作為 `OLD`，並使用新的 `RELEASE`。
+
+```bash
+docker exec "$NEW" python -c 'import json, sys; sys.exit(json.load(open("/data/_state/owner.json"))["owner"] != sys.argv[1])' "$RELEASE" && docker stop "$OLD"
+```
+
+Compose 主管共用 Docker 原生的 `supervisor_locks` volume，並按交易所與批次區分鎖。請在整個 run 期間保留這個 volume。候選若看不到舊主管持有的鎖會在交接前報錯。使用 Docker 資料 volume 時，雙方傳入相同的 `--data-volume` 替代 `--host-output`。直接對運行中的服務執行 `docker compose up` 重建容器會走一般停止流程；需要不中斷換主管時請使用上述交接命令。
+
+### 如何判讀 worker 故障
+
+`worker_quarantined` 會記錄 worker ID、例外原因、可取得的 worker 錯誤與 Docker 退出狀態。`worker_replaced` 記錄新 ID，`worker_spool_recovered` 表示舊 spool 的持久序號已與主管游標核對並完成清理。第一次故障立即補位，同席位短時間內反覆失敗時逐步退避，最多 60 秒。Docker API 暫時失聯時先重試，以免同時建立過多副本。
+
+`status.json` 的 `active`、`supervisor_id` 和 `storage_incidents` 可核對目前的雙路、主管及歷史故障。`commit_blocked` 有內容代表正式儲存暫時拒寫，worker 會保留未確認資料並重試。主管及 worker 共用的主機、磁碟、網路故障仍會影響持續採集，能承受的中斷時間受 spool 容量限制。
 
 ## 處理舊版主管反覆重啟與 worker 儲存錯誤
 
@@ -144,4 +188,51 @@ docker run --rm --init --name "collector-${EXCHANGE}-short-test" \
 
 `--data-volume` 必須與主管實際掛載於 `/data` 的 volume 相同。與 `--host-output` 互斥。其他交易所替換 `--exchange`、容器名稱及 volume 名稱即可，worker 程式完全相同。正式採集才移除 `--duration` 並使用背景執行及重啟政策。不可同時啟動兩個主管寫同一 volume。
 
-停止並排空後，五家交易所都可掛載各自的 volume 匯出原生 channel CSV。各家批次可使用同一映像中的 `/app/step2/02_normalize_tardis/02_normalize_tardis.py --exchange <交易所>` 離線正規化，再將該家的輸出交給第 03 階段對帳。備份需包含 JSONL、manifest 及狀態。只取 channel CSV 不足以恢復採集。不要刪除尚未備份的 volume，也不要以執行中資料的普通檔案複製代替一致性備份。
+五家交易所都可唯讀掛載各自的 volume，使用 `export-jsonl --date` 或 `export-csv --date` 匯出前一天的封段。採集期間可對 02 指定同一 UTC 日期；整批重播待停止並排空後執行。各家批次可使用同一映像中的 `/app/step2/02_normalize_tardis/02_normalize_tardis.py --exchange <交易所>` 離線正規化，再將該家的輸出交給第 03 階段對帳。備份需包含 JSONL、manifest 及狀態。只取 channel CSV 不足以恢復採集。不要刪除尚未備份的 volume，也不要以執行中資料的普通檔案複製代替一致性備份。
+
+## 監控群組換線及資料盤
+
+每家主管的持久日誌在 `$DATA_ROOT/<交易所>/supervisor.log`，預設每五秒寫心跳。這個路徑可跨主管接管繼續追蹤。容器日誌和目前的交接狀態可用以下指令讀取。
+
+```bash
+cd tardis_sample/step2/01_collector
+EXCHANGE=binance
+docker compose logs -f --since=15m "$EXCHANGE"
+tail -F "$DATA_ROOT/$EXCHANGE/supervisor.log"
+jq '{active,ws_rotation,delivery_backlog,delivery_rates,storage,uncovered_gaps}' "$DATA_ROOT/$EXCHANGE/status.json"
+docker ps --filter "label=collector.exchange=$EXCHANGE" --format '{{.Names}}'
+```
+
+`event=ws_rotation` 記錄候選開線、核准、成功及跳過原因，`ws_rotation.trial` 含群組、副本、舊 session、驗證狀態及期限。最近 100 個決策在 `ws_rotation.history`，完整決策留在 `_state/merge.sqlite` 的 `rotation_decisions`。有證據的收訊停滯、序號缺口及無效行情優先開候選，核准關舊線的成功交接仍至少相隔 600 秒。Upbit 的握手採錯峰發起，HTTP 429 的冷卻由同一交易所 A/B 共用。實際網路中斷及重連可在 `event=replica_notice` 查到，各線最近的連線事件在 `storage.recent_connections`。升級後可用 `docker logs -f <現役主管名稱>` 追蹤新容器。
+
+`delivery_backlog` 在任一路最舊等待超過 10 秒或使用達 80% 時啟動，整理上限降為每批 256 筆。連續三次健康回報均低於 5 秒及 60% 才解除。每路峰值取自相鄰心跳的實際 spool 寫入位元組差。可承受停頓時間採剩餘 spool 容量除以觀測峰值。磁碟剩餘天數以至少一小時、最多最近一天的裝置可用空間淨變化估算，樣本不足或淨成長為零時顯示 `null`。
+
+## 選用第二顆本機磁碟
+
+新去重版本請指定全新的 `DATA_ROOT`。第二顆本機磁碟以獨立檔案系統掛載。先在 Linux 核對裝置及掛載點，再在冷盤建立一次持久 UUID。保留此標識並備份；已存在時沿用原值。
+
+```bash
+export DATA_ROOT=/mnt/hot/market-data/run-002
+export COLD_ROOT=/mnt/cold
+findmnt --mountpoint "$COLD_ROOT"
+lsblk -o NAME,PKNAME,SERIAL,FSTYPE,MOUNTPOINTS
+if [ ! -e "$COLD_ROOT/.collector-volume-id" ]; then
+  mountpoint -q "$COLD_ROOT" && (set -C; uuidgen > "$COLD_ROOT/.collector-volume-id")
+fi
+export COLD_VOLUME_ID="$(cat "$COLD_ROOT/.collector-volume-id")"
+export COMPOSE_FILE=compose.yaml:compose.cold.yaml
+docker compose --profile build build collector
+docker compose up -d binance bybit okx coinbase upbit
+```
+
+冷盤只掛至 supervisor 的 `/cold`。掛載覆寫禁止 Docker 自動建立來源目錄。程式檢查裝置號與身分檔；實體硬碟是否獨立請依上方序號核對。封存目的地為 `$COLD_ROOT/<交易所>/<批次識別>/`，封段滿 24 小時後校驗壓縮檔 SHA-256、逐筆 seq、首末序號及筆數，提交位置目錄後才清理熱盤。冷盤另存 manifest 及永久精確索引。未設定冷盤時，行情及歷史查重索引持續保存在原資料目錄。
+
+冷盤失聯時 `storage.cold_error`、`storage.history_waiting` 及日誌說明狀況。可能命中歷史索引的原文在未確認 spool 等待，其他來源可繼續提交。重掛原裝置後，主管重新核實索引並推進連續 ACK。持續觀察 `oldest_pending_s` 與剩餘容量。兩顆磁碟都要有獨立備份。
+
+在主機執行 01 匯出或 02 時，將 `COLD_ROOT` 設為主機的掛載路徑，原始輸入仍指定熱盤的 run。用 Docker 離線處理時加上冷盤唯讀掛載並設定容器內的路徑。保留熱盤的 manifest、位置目錄及狀態資料庫。
+
+```bash
+EXCHANGE=bybit
+python3 01_collect.py export-csv --input "$DATA_ROOT/$EXCHANGE" --output "/mnt/analysis/raw-csv/$EXCHANGE"
+python3 ../02_normalize_tardis/02_normalize_tardis.py --exchange "$EXCHANGE" --input "$DATA_ROOT/$EXCHANGE" --output "/mnt/analysis/tardis/$EXCHANGE"
+```

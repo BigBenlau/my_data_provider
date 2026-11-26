@@ -13,8 +13,16 @@ from .redundancy import code_version, fingerprint
 from .raw import StorageError
 
 
-class WorkerStorageFailure(StorageError):
+class WorkerFailure(StorageError):
+    """單一 worker 的退出或異常重啟，保留其緩衝並另建副本。"""
+
+
+class WorkerStorageFailure(WorkerFailure):
     """已停止的 worker 回報儲存故障，主管仍可處理其他副本的交付。"""
+
+
+class RuntimeUnavailable(RuntimeError):
+    """容器引擎暫時無法確認狀態，保留原有副本並重試。"""
 
 
 class Runtime:
@@ -24,6 +32,7 @@ class Runtime:
         self.root = Path(root); self.config = config; self.backend = backend
         self.requested_image = image; self.host_root = host_root or str(self.root)
         self.path = self.root / '_state' / 'runtime.json'; self.http = None
+        self.exit_reasons = {}
         self.entries = json.loads(self.path.read_text()) if self.path.exists() else {}
         self.prefix = f"collector-{config['family']}-{fingerprint(self.host_root)[:6]}-"
 
@@ -42,7 +51,7 @@ class Runtime:
         url = 'http://docker/' + self.config['redundancy']['docker_api'] + path
         async with self.http.request(method, url, json=body) as response:
             text = await response.text()
-            if response.status not in allowed: raise RuntimeError(f'Docker {method} {path}: {response.status} {text}')
+            if response.status not in allowed: raise RuntimeUnavailable(f'Docker {method} {path}: {response.status} {text}')
             return json.loads(text) if text else None
 
     def command(self, worker, root):
@@ -63,7 +72,7 @@ class Runtime:
         else:
             try:
                 await self.start_container(worker)
-            except WorkerStorageFailure:
+            except WorkerFailure:
                 # 主管若在建立容器後崩潰，接管時也要記住已退出的同一副本。
                 atomic_json(self.path, self.entries)
                 raise
@@ -109,7 +118,7 @@ class Runtime:
         state = info['State']
         if (not state['Running'] or state.get('Restarting')) and state.get('ExitCode') == 74:
             raise WorkerStorageFailure(f'worker={worker} container={name} exit_code=74')
-        return state['Running']
+        return state['Running'] and not state.get('Restarting', False)
 
     async def alive(self, worker):
         # 程序狀態與 IPC 健康分開；活著不代表可安全交接。
@@ -120,9 +129,40 @@ class Runtime:
             info = await self.api('GET', '/containers/' + item['name'] + '/json', allowed=(200, 404))
             if 'Id' not in info: return False
             if info['Image'] != self.image: raise ValueError('worker image mismatch')
-            return self.running(worker, item['name'], info)
+            state = info['State']
+            restarted = info.get('RestartCount', 0) > item.get('restart_count', 0)
+            if not state['Running'] or state.get('Restarting') or restarted:
+                self.exit_reasons[worker] = {k: state.get(k) for k in ('Status', 'ExitCode', 'OOMKilled', 'Error', 'FinishedAt')}
+            alive = self.running(worker, item['name'], info)
+            if alive and restarted:
+                # Docker 可能已在兩次心跳之間把被殺死的程序拉起，仍須保存事故紀錄。
+                raise WorkerFailure(f'worker={worker} unexpected Docker restart count={info["RestartCount"]}')
+            return alive
         result = await asyncio.to_thread(subprocess.run, ['ps', '-p', str(item['pid']), '-o', 'command='], capture_output=True, text=True)
         return result.returncode == 0 and '--worker-id ' + worker in result.stdout
+
+    async def quiesce(self, worker):
+        # 先核對身分，再停用自動重啟並保留容器與 spool，讓主管安全補交。
+        item = self.entries.get(worker)
+        if not item:
+            return
+        if self.backend == 'local':
+            if await self.alive(worker):
+                os.kill(item['pid'], signal.SIGTERM)
+                raise RuntimeUnavailable('waiting for local worker to drain')
+            return
+        url = '/containers/' + item['name']
+        info = await self.api('GET', url + '/json', allowed=(200, 404))
+        if 'Id' not in info:
+            return
+        labels = info['Config']['Labels']
+        if (info['Image'] != self.image or labels.get('collector.worker') != worker
+                or labels.get('collector.group') != self.config['config_hash']):
+            raise ValueError('refusing to stop a container with different identity')
+        # 使用不可變容器 ID，避免名稱在兩次 API 呼叫間被重用。
+        url = '/containers/' + info['Id']
+        await self.api('POST', url + '/update', {'RestartPolicy': {'Name': 'no'}}, allowed=(200, 404))
+        await self.api('POST', url + '/stop?t=10', allowed=(204, 304, 404))
 
     async def stop(self, worker):
         # 呼叫前由 supervisor 驗證已排空；即使強制停止也不刪除未確認 spool。

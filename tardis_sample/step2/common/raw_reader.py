@@ -2,6 +2,7 @@
 import fcntl
 import gzip
 import json
+from .segments import catalog_entries, disk_names, first_seq, location, sealed_names, segment_batches, sealed_snapshot
 from pathlib import Path
 
 
@@ -18,8 +19,8 @@ def read_records(run,recover=False,warnings=None):
         yield from read_merged_records(run, recover, warnings)
         return
     expected=1
-    files=sorted((Path(run)/'raw').glob('*.jsonl.gz*'))
-    legacy=sorted((Path(run)/'raw').glob('*.jsonl'))
+    files = [Path(run)/'raw'/n for n in sorted(disk_names(run, '*.jsonl.gz*'), key=first_seq)]
+    legacy = [Path(run)/'raw'/name for name in disk_names(run, '*.jsonl')]
     if legacy:
         if files: raise ValueError('mixed legacy and v2 segments')
         from contextlib import ExitStack
@@ -67,10 +68,12 @@ def read_merged_records(run, recover=False, warnings=None):
         import sqlite3
         db = sqlite3.connect(f'file:{root / "_state" / "merge.sqlite"}?mode=ro', uri=True)
         committed = db.execute('SELECT written FROM output').fetchone()[0]; db.close()
-    paths = {p.name.removesuffix('.gz'): p for p in (root / 'raw').glob('*.jsonl.gz')}
-    paths.update({p.name: p for p in (root / 'raw').glob('*.jsonl')})
-    paths.update({p.name: p for p in (root / 'raw').glob('*.jsonl.part')})
-    for _, path in sorted(paths.items()):
+    names = {name.removesuffix('.gz') for name in disk_names(root, '*.jsonl*')
+             if name.endswith(('.jsonl', '.jsonl.gz', '.jsonl.part'))}
+    for name in sorted(names | sealed_names(root), key=lambda item: Path(item).name):
+        path = root / 'raw' / name
+        if not name.endswith('.part'):
+            path = location(root,name)
         partial = path.name.endswith('.part')
         if partial and not recover: raise ValueError('unclean merged segment; restart supervisor or use --recover')
         with open_segment(path) as handle:
@@ -82,8 +85,8 @@ def read_merged_records(run, recover=False, warnings=None):
                 expected += 1; yield record
 
 
-def read_runs(source, recover=False, warnings=None):
-    # 共用 manifest/schema/程序鎖檢查，拒絕處理仍在採集的 run。
+def read_runs(source, recover=False, warnings=None, live_day=None):
+    # 全批次需停止採集；指定日期的主管批次可從已封存範圍唯讀重播。
     source=Path(source); warnings=warnings if warnings is not None else []
     roots=[source] if (source/'manifest.json').exists() else sorted(p.parent for p in source.glob('*/manifest.json'))
     if not roots: raise ValueError('no collector runs found')
@@ -91,7 +94,10 @@ def read_runs(source, recover=False, warnings=None):
         manifest=json.loads((root/'manifest.json').read_text())
         if manifest.get('schema_version') not in (2, 3) and manifest.get('raw_schema_version')!=1:
             raise ValueError(f'unsupported raw schema: {root}')
-        if manifest['status']=='running':
+        if manifest['status'] == 'running' and live_day and manifest.get('schema_version') == 3:
+            # 每日重播固定已封存序號，不取得採集鎖，也不開啟尚在寫入的尾段。
+            manifest['sealed_through_seq'] = sealed_snapshot(root, live_day)
+        elif manifest['status']=='running':
             lock_path = root / '.collector.lock' if manifest.get('schema_version') == 3 else root.parent / '.collector.lock'
             with lock_path.open('a') as lock:
                 try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -105,3 +111,13 @@ def check_count(root, manifest, count, recover, warnings):
     if manifest['status']!='running' and count!=manifest['raw_records']:
         if not recover: raise ValueError('manifest/raw record count mismatch')
         warnings.append({'run':str(root),'reason':'record_count_mismatch','expected':manifest['raw_records'],'actual':count})
+
+def snapshot_records(root, end):
+    # 從第一筆預熱狀態，固定末端可讓長時間重播忽略後續新增的封段。
+    expected = 1
+    for name, first, last in catalog_entries(root.resolve(), 0, None, limit=end):
+        if first != expected:
+            raise ValueError('sealed snapshot sequence mismatch')
+        expected = last + 1
+        for batch in segment_batches(root, name, first, last):
+            yield from batch

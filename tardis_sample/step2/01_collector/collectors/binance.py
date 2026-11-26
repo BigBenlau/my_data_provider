@@ -98,6 +98,8 @@ class RestPolicy:
 
 class Collector(BaseCollector):
     """交易所專屬的來源與協議實作；傳輸、落盤與日誌沿用 BaseCollector。"""
+    publication_fields = {'E'}
+    publication_object = 'data'
     rest_policy = RestPolicy
     legacy_multi_market = True
     optional_channels = ('forceOrder',)

@@ -1,0 +1,18 @@
+# 僅主管讀寫冷盤。操作員先在已掛載的第二顆磁碟建立持久身分檔。
+x-cold: &cold
+  environment:
+    COLD_ROOT: /cold
+    COLD_VOLUME_ID: ${COLD_VOLUME_ID:?set cold volume id}
+  volumes:
+    - type: bind
+      source: ${COLD_ROOT:?set absolute cold mount path}
+      target: /cold
+      bind:
+        create_host_path: false
+
+services:
+  binance: *cold
+  bybit: *cold
+  okx: *cold
+  coinbase: *cold
+  upbit: *cold
